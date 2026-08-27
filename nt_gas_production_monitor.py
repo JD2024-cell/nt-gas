@@ -736,7 +736,6 @@ def render_admin_section(engine, session_maker):
             record_count = session.query(GBBRecord).count()
             nt_count = session.query(GBBRecord).filter(GBBRecord.state == 'NT').count()
             latest_import = session.query(func.max(GBBRecord.imported_date)).scalar()
-            session.close()
             
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -748,6 +747,39 @@ def render_admin_section(engine, session_maker):
                     st.metric("Last Import", latest_import.strftime("%Y-%m-%d %H:%M"))
                 else:
                     st.metric("Last Import", "Never")
+            
+            # Diagnostic: Show actual NT-related facilities
+            st.markdown("---")
+            st.markdown("### 🔍 Facility Diagnostics")
+            
+            # Get all unique states
+            states_query = session.query(GBBRecord.state, func.count(GBBRecord.id)).group_by(GBBRecord.state).all()
+            st.write("**States in database:**", dict(states_query))
+            
+            # Search for potential NT facilities by name patterns
+            search_terms = ['mereenie', 'palm valley', 'blacktip', 'yelcherr', 'yellerr', 'amadeus', 'bonaparte']
+            matching_facilities = session.query(
+                GBBRecord.facility_name, 
+                GBBRecord.state, 
+                GBBRecord.facility_type,
+                func.count(GBBRecord.id).label('count')
+            ).filter(
+                func.lower(GBBRecord.facility_name).contains('mereenie') |
+                func.lower(GBBRecord.facility_name).contains('palm') |
+                func.lower(GBBRecord.facility_name).contains('blacktip') |
+                func.lower(GBBRecord.facility_name).contains('yelcherr') |
+                func.lower(GBBRecord.facility_name).contains('yellerr')
+            ).group_by(GBBRecord.facility_name, GBBRecord.state, GBBRecord.facility_type).all()
+            
+            if matching_facilities:
+                st.write("**Found NT-related facilities:**")
+                for fac in matching_facilities:
+                    st.write(f"- **{fac[0]}** (State: {fac[1]}, Type: {fac[2]}, Records: {fac[3]})")
+            else:
+                st.warning("No facilities matching NT field names found in database")
+            
+            session.close()
+            
         except Exception as e:
             st.error(f"Database query failed: {str(e)}")
 
