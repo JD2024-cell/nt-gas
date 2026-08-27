@@ -330,6 +330,8 @@ def calculate_nt_metrics(nt_df):
         return {
             'latest_date': None,
             'total_current': 0,
+            'change_vs_prev': 0,
+            'avg_7d_total': 0,
             'fields': {},
             'daily_total': pd.DataFrame(),
             'daily_by_field': pd.DataFrame()
