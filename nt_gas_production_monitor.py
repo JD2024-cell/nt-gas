@@ -20,7 +20,6 @@ import os
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, UniqueConstraint
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.sql import func
-from sqlalchemy.dialects.postgresql import insert
 
 # Local configuration
 from nt_config import (
@@ -235,40 +234,40 @@ def upsert_gbb_data(engine, session_maker, df):
     """
     Upsert GBB data to database using (gas_date, facility_id) as unique key.
     Does NOT delete existing records - preserves history.
+    Works with both SQLite and PostgreSQL.
     """
     if df is None or df.empty:
         return False
     
     try:
-        # Use PostgreSQL INSERT ... ON CONFLICT for efficient upsert
+        session = session_maker()
         records = df.to_dict('records')
         
-        with engine.begin() as connection:
-            for record in records:
-                stmt = insert(GBBRecord).values(**record)
-                stmt = stmt.on_conflict_do_update(
-                    constraint='uix_gas_date_facility',
-                    set_={
-                        'facility_name': stmt.excluded.facility_name,
-                        'facility_type': stmt.excluded.facility_type,
-                        'demand': stmt.excluded.demand,
-                        'supply': stmt.excluded.supply,
-                        'transfer_in': stmt.excluded.transfer_in,
-                        'transfer_out': stmt.excluded.transfer_out,
-                        'held_in_storage': stmt.excluded.held_in_storage,
-                        'cushion_gas_storage': stmt.excluded.cushion_gas_storage,
-                        'state': stmt.excluded.state,
-                        'location_name': stmt.excluded.location_name,
-                        'location_id': stmt.excluded.location_id,
-                        'last_updated': stmt.excluded.last_updated,
-                        'imported_date': stmt.excluded.imported_date
-                    }
-                )
-                connection.execute(stmt)
+        for record in records:
+            # Check if record exists
+            existing = session.query(GBBRecord).filter_by(
+                gas_date=record['gas_date'],
+                facility_id=record['facility_id']
+            ).first()
+            
+            if existing:
+                # Update existing record
+                for key, value in record.items():
+                    if key != 'id':  # Don't update primary key
+                        setattr(existing, key, value)
+            else:
+                # Insert new record
+                new_record = GBBRecord(**record)
+                session.add(new_record)
         
+        session.commit()
+        session.close()
         return True
         
     except Exception as e:
+        if session:
+            session.rollback()
+            session.close()
         st.error(f"Failed to upsert data: {str(e)}")
         return False
 
