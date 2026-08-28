@@ -842,44 +842,40 @@ def render_basin_composition(metrics):
     
     if total_all > 0:
         # Create horizontal composition bar
-        bar_html = '<div class="basin-bar">'
+        bar_segments = []
         for basin_name, total in basin_totals.items():
             if total > 0:
                 percentage = (total / total_all) * 100
                 color = basin_colors.get(basin_name, '#95a5a6')
-                bar_html += f'''
-                <div class="basin-segment" style="flex: {percentage}; background-color: {color};">
-                    {basin_name}<br>{total:.1f} TJ/d
-                </div>
-                '''
-        bar_html += '</div>'
+                segment = f'<div class="basin-segment" style="flex: {percentage}; background-color: {color};">{basin_name}<br>{total:.1f} TJ/d</div>'
+                bar_segments.append(segment)
         
-        st.markdown(bar_html, unsafe_allow_html=True)
+        if bar_segments:
+            bar_html = '<div class="basin-bar">' + ''.join(bar_segments) + '</div>'
+            st.markdown(bar_html, unsafe_allow_html=True)
         
-        # Legend with details
-        legend_html = '<div class="basin-legend">'
-        for basin_name, basin_config in BASINS.items():
-            total = basin_totals[basin_name]
-            percentage = (total / total_all * 100) if total_all > 0 else 0
-            color = basin_colors.get(basin_name, '#95a5a6')
-            
-            # List producing fields
-            producing = [f for f in basin_config['fields'] 
-                        if metrics['fields'].get(f, {}).get('has_data', False)]
-            fields_text = ', '.join(producing) if producing else 'no active production'
-            
-            legend_html += f'''
-            <div class="basin-legend-item">
-                <div class="basin-color-box" style="background-color: {color};"></div>
-                <div>
-                    <strong>{basin_name} Basin:</strong> {total:.1f} TJ/d ({percentage:.0f}%)<br>
-                    <span style="font-size: 0.75rem; color: #888;">{fields_text}</span>
-                </div>
-            </div>
-            '''
-        legend_html += '</div>'
+        # Legend with details - use columns instead of custom HTML
+        st.markdown("") 
+        cols = st.columns(3)
         
-        st.markdown(legend_html, unsafe_allow_html=True)
+        for i, (basin_name, basin_config) in enumerate(BASINS.items()):
+            with cols[i]:
+                total = basin_totals[basin_name]
+                percentage = (total / total_all * 100) if total_all > 0 else 0
+                color = basin_colors.get(basin_name, '#95a5a6')
+                
+                # Color box and label using markdown
+                color_box = f'<div style="display: inline-block; width: 12px; height: 12px; background-color: {color}; border-radius: 2px; margin-right: 6px; vertical-align: middle;"></div>'
+                st.markdown(f'{color_box} **{basin_name} Basin**', unsafe_allow_html=True)
+                st.caption(f"{total:.1f} TJ/d ({percentage:.0f}% of NT total)")
+                
+                # List producing fields
+                producing = [f for f in basin_config['fields'] 
+                            if metrics['fields'].get(f, {}).get('has_data', False)]
+                if producing:
+                    st.caption(f"Fields: {', '.join(producing)}")
+                else:
+                    st.caption("No active production")
     else:
         st.info("No production data available for basin breakdown")
 
