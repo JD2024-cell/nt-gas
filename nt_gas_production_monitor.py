@@ -815,7 +815,7 @@ def render_nt_history_chart(metrics):
         yaxis=dict(showgrid=True, gridcolor='#f0f0f0')
     )
     
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
 def render_basin_composition(metrics):
     """Render compact visual basin-level production breakdown"""
@@ -944,7 +944,7 @@ def render_field_analysis(metrics, nt_df):
             )
         )
         
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
 def render_admin_section(engine, session_maker):
     """Render collapsed admin/diagnostics section"""
