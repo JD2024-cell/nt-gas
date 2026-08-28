@@ -1052,23 +1052,28 @@ def main():
     render_admin_section(engine, Session)
     
     # Improved footer
-    footer_html = f"""
-    <div class="dashboard-footer">
-        <p><strong>Data Attribution:</strong> Gas production data sourced from the 
-        <a href="https://www.aemo.com.au/energy-systems/gas/gas-bulletin-board-gbb" target="_blank">AEMO Gas Bulletin Board</a> 
-        via <a href="https://nemweb.com.au/Reports/Current/GBB/" target="_blank">nemweb.com.au</a></p>
-        
-        <p><strong>Dashboard Information:</strong> This is an independent public dashboard displaying Northern Territory 
-        gas production data. Latest data: {metrics['latest_date'].strftime("%d %B %Y") if metrics['latest_date'] else "unavailable"}. 
-        The dashboard updates as AEMO publishes new Gas Bulletin Board reports.</p>
-        
-        <p style="font-size: 0.75rem; color: #999; margin-top: 0.5rem;">
-        Not affiliated with AEMO, gas producers, or government agencies. For official market information, 
-        consult <a href="https://www.aemo.com.au" target="_blank">aemo.com.au</a>
-        </p>
-    </div>
-    """
-    st.markdown(footer_html, unsafe_allow_html=True)
+    st.markdown("---")
+    
+    # Data attribution
+    st.markdown(
+        "**Data Attribution:** Gas production data sourced from the "
+        "[AEMO Gas Bulletin Board](https://www.aemo.com.au/energy-systems/gas/gas-bulletin-board-gbb) "
+        "via [nemweb.com.au](https://nemweb.com.au/Reports/Current/GBB/)"
+    )
+    
+    # Dashboard information
+    latest_date_str = metrics['latest_date'].strftime("%d %B %Y") if metrics['latest_date'] else "unavailable"
+    st.markdown(
+        f"**Dashboard Information:** This is an independent public dashboard displaying Northern Territory "
+        f"gas production data. Latest data: {latest_date_str}. "
+        f"The dashboard updates as AEMO publishes new Gas Bulletin Board reports."
+    )
+    
+    # Disclaimer
+    st.caption(
+        "Not affiliated with AEMO, gas producers, or government agencies. "
+        "For official market information, consult [aemo.com.au](https://www.aemo.com.au)"
+    )
 
 if __name__ == "__main__":
     main()
