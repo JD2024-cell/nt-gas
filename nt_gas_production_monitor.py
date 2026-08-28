@@ -39,66 +39,272 @@ st.set_page_config(
 # Custom CSS for professional styling
 st.markdown("""
 <style>
-    /* Main container styling */
+    /* Main container - reduced padding by 35% */
     .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
-        max-width: 1400px;
+        padding-top: 1.3rem;
+        padding-bottom: 1.3rem;
+        max-width: 1200px;
     }
     
-    /* Title styling */
+    /* Title styling - tighter spacing */
     h1 {
         color: #1a1a1a;
         font-weight: 700;
-        margin-bottom: 0.5rem;
+        margin-bottom: 0.25rem;
+        font-size: 2rem;
     }
     
     h2 {
         color: #2c3e50;
         font-weight: 600;
-        margin-top: 2rem;
-        margin-bottom: 1rem;
-        border-bottom: 2px solid #e0e0e0;
-        padding-bottom: 0.5rem;
+        margin-top: 1.2rem;
+        margin-bottom: 0.6rem;
+        border-bottom: 1px solid #e8e8e8;
+        padding-bottom: 0.3rem;
+        font-size: 1.4rem;
     }
     
     h3 {
         color: #34495e;
         font-weight: 600;
+        margin-top: 0;
+        margin-bottom: 0.3rem;
+        font-size: 1.1rem;
     }
     
-    /* Metric styling */
+    /* Prominent primary KPI */
+    .primary-kpi [data-testid="stMetricValue"] {
+        font-size: 3.5rem;
+        font-weight: 800;
+        color: #0066cc;
+    }
+    
+    .primary-kpi [data-testid="stMetricLabel"] {
+        font-size: 1.1rem;
+        font-weight: 600;
+        color: #333;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    
+    /* Standard metrics */
     [data-testid="stMetricValue"] {
-        font-size: 2.5rem;
+        font-size: 1.8rem;
         font-weight: 700;
     }
     
     [data-testid="stMetricLabel"] {
+        font-size: 0.85rem;
+        font-weight: 500;
+        color: #666;
+    }
+    
+    [data-testid="stMetricDelta"] {
+        font-size: 0.8rem;
+    }
+    
+    /* Compact field cards */
+    .field-card {
+        background: #fafafa;
+        padding: 1rem;
+        border-radius: 6px;
+        border: 1px solid #e0e0e0;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+        margin-bottom: 0.75rem;
+        transition: all 0.2s ease;
+    }
+    
+    .field-card:hover {
+        border-color: #0066cc;
+        box-shadow: 0 2px 6px rgba(0,102,204,0.1);
+    }
+    
+    .field-card-header {
         font-size: 1rem;
+        font-weight: 700;
+        color: #1a1a1a;
+        margin-bottom: 0.2rem;
+    }
+    
+    .field-card-meta {
+        font-size: 0.75rem;
+        color: #888;
+        margin-bottom: 0.6rem;
+    }
+    
+    .field-card-value {
+        font-size: 1.6rem;
+        font-weight: 700;
+        color: #0066cc;
+    }
+    
+    .field-card-avg {
+        font-size: 0.75rem;
+        color: #666;
+    }
+    
+    /* Trend indicator pill */
+    .trend-pill {
+        display: inline-block;
+        padding: 0.15rem 0.5rem;
+        border-radius: 12px;
+        font-size: 0.7rem;
+        font-weight: 600;
+        margin-left: 0.5rem;
+    }
+    
+    .trend-up {
+        background: #d4edda;
+        color: #155724;
+    }
+    
+    .trend-down {
+        background: #f8d7da;
+        color: #721c24;
+    }
+    
+    .trend-stable {
+        background: #e2e3e5;
+        color: #383d41;
+    }
+    
+    /* Period selector buttons */
+    .period-selector {
+        display: flex;
+        gap: 0.5rem;
+        justify-content: flex-end;
+        margin-bottom: 0.75rem;
+    }
+    
+    .period-btn {
+        padding: 0.4rem 0.9rem;
+        border-radius: 4px;
+        border: 1px solid #d0d0d0;
+        background: white;
+        cursor: pointer;
+        font-size: 0.8rem;
         font-weight: 500;
         color: #555;
+        transition: all 0.15s;
     }
     
-    /* Card styling */
-    .field-card {
-        background: white;
-        padding: 1.5rem;
-        border-radius: 8px;
-        border: 1px solid #e0e0e0;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-        margin-bottom: 1rem;
+    .period-btn:hover {
+        background: #f5f5f5;
+        border-color: #0066cc;
     }
     
-    /* Subtle divider */
-    hr {
-        margin: 2rem 0;
-        border: none;
-        border-top: 1px solid #e0e0e0;
+    .period-btn-active {
+        background: #0066cc;
+        color: white;
+        border-color: #0066cc;
     }
     
-    /* Remove extra padding from metric containers */
-    [data-testid="stMetricDelta"] {
+    /* Basin composition bar */
+    .basin-bar {
+        display: flex;
+        height: 60px;
+        border-radius: 6px;
+        overflow: hidden;
+        margin: 0.5rem 0 1rem 0;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    
+    .basin-segment {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-weight: 600;
         font-size: 0.9rem;
+        padding: 0.5rem;
+        text-align: center;
+        transition: all 0.2s;
+    }
+    
+    .basin-segment:hover {
+        filter: brightness(1.1);
+    }
+    
+    .basin-legend {
+        display: flex;
+        gap: 1.5rem;
+        margin-top: 0.5rem;
+        font-size: 0.85rem;
+    }
+    
+    .basin-legend-item {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+    }
+    
+    .basin-color-box {
+        width: 18px;
+        height: 18px;
+        border-radius: 3px;
+    }
+    
+    /* Dividers - reduced spacing by 35% */
+    hr {
+        margin: 1.3rem 0;
+        border: none;
+        border-top: 1px solid #e8e8e8;
+    }
+    
+    /* Compact sections */
+    .stPlotlyChart {
+        margin-bottom: 0.5rem;
+    }
+    
+    /* Footer styling */
+    .dashboard-footer {
+        margin-top: 2rem;
+        padding-top: 1rem;
+        border-top: 1px solid #e8e8e8;
+        font-size: 0.8rem;
+        color: #666;
+        line-height: 1.5;
+    }
+    
+    .dashboard-footer a {
+        color: #0066cc;
+        text-decoration: none;
+    }
+    
+    .dashboard-footer a:hover {
+        text-decoration: underline;
+    }
+    
+    /* Beetaloo emerging panel */
+    .beetaloo-panel {
+        background: #f9f9f9;
+        border: 1px solid #e0e0e0;
+        border-radius: 6px;
+        padding: 1rem;
+        margin-bottom: 0.75rem;
+    }
+    
+    .beetaloo-panel h4 {
+        margin: 0 0 0.3rem 0;
+        font-size: 1rem;
+        color: #1a1a1a;
+    }
+    
+    .beetaloo-panel .subtitle {
+        font-size: 0.75rem;
+        color: #888;
+        margin-bottom: 0.5rem;
+    }
+    
+    .beetaloo-panel .notice {
+        font-size: 0.85rem;
+        color: #666;
+        font-style: italic;
+    }
+    
+    /* Reduce Streamlit default spacing */
+    .element-container {
+        margin-bottom: 0.5rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -431,22 +637,28 @@ def render_header(metrics):
     
     if metrics['latest_date']:
         date_str = metrics['latest_date'].strftime("%d %B %Y")
-        st.caption(f"**Northern Territory gas production at a glance** • Latest data: {date_str}")
+        st.caption(f"Northern Territory gas production at a glance • Latest data: {date_str}")
     else:
-        st.caption("**Northern Territory gas production at a glance**")
-    
-    st.markdown("<br>", unsafe_allow_html=True)
+        st.caption("Northern Territory gas production at a glance")
 
 def render_headline_kpi(metrics):
-    """Render main production KPI with context"""
-    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+    """Render main production KPI with prominent total and supporting metrics"""
+    col1, col2, col3 = st.columns([3, 1.5, 1.5])
     
     with col1:
+        # Prominent primary KPI
+        delta_text = None
+        if metrics['avg_7d_total'] > 0:
+            change_vs_7d = metrics['total_current'] - metrics['avg_7d_total']
+            delta_text = f"{change_vs_7d:+.1f} TJ/d vs 7-day avg"
+        
+        st.markdown('<div class="primary-kpi">', unsafe_allow_html=True)
         st.metric(
             label="Total NT Gas Production",
             value=f"{metrics['total_current']:.1f} TJ/d",
-            delta=f"{metrics['change_vs_prev']:+.1f} TJ/d vs prev day" if metrics['change_vs_prev'] != 0 else None
+            delta=delta_text
         )
+        st.markdown('</div>', unsafe_allow_html=True)
     
     with col2:
         st.metric(
@@ -455,65 +667,71 @@ def render_headline_kpi(metrics):
         )
     
     with col3:
-        if metrics['avg_7d_total'] > 0:
-            change_vs_7d = metrics['total_current'] - metrics['avg_7d_total']
-            st.metric(
-                label="vs 7-Day Avg",
-                value=f"{change_vs_7d:+.1f} TJ/d"
-            )
-        else:
-            st.metric(label="vs 7-Day Avg", value="—")
-    
-    with col4:
         producing_count = len([f for f, m in metrics['fields'].items() if m['has_data']])
-        st.metric(label="Active Fields", value=str(producing_count))
+        st.metric(
+            label="Active Fields",
+            value=str(producing_count)
+        )
 
 def render_field_cards(metrics):
-    """Render individual field production cards"""
+    """Render compact professional field production cards"""
     st.markdown("---")
     st.subheader("Field Production")
     
-    # Arrange cards in rows
-    for i in range(0, len(FIELD_DISPLAY_ORDER), 3):
-        cols = st.columns(3)
-        
-        for j, field_name in enumerate(FIELD_DISPLAY_ORDER[i:i+3]):
-            with cols[j]:
-                field_config = NT_FIELDS[field_name]
-                field_metrics = metrics['fields'].get(field_name, {})
-                
-                # Card container
-                if field_metrics.get('has_data', False):
-                    # Producing field
-                    st.markdown(f"### {field_name}")
-                    st.caption(f"{field_config['basin']} Basin • {field_config['operator']}")
-                    
-                    col_a, col_b = st.columns(2)
-                    with col_a:
-                        st.metric(
-                            label="Current",
-                            value=f"{field_metrics['current']:.1f} TJ/d"
-                        )
-                    with col_b:
-                        trend_emoji = {"up": "📈", "down": "📉", "stable": "➡️"}
-                        st.metric(
-                            label="Trend",
-                            value=trend_emoji[field_metrics['trend']]
-                        )
-                    
-                    col_c, col_d = st.columns(2)
-                    with col_c:
-                        st.caption(f"**7-day avg:** {field_metrics['avg_7d']:.1f} TJ/d")
-                    with col_d:
-                        st.caption(f"**30-day avg:** {field_metrics['avg_30d']:.1f} TJ/d")
+    # Separate producing fields and Beetaloo awaiting fields
+    producing_fields = ['Mereenie', 'Palm Valley', 'Blacktip']
+    beetaloo_fields = ['Shenandoah South', 'Carpentaria']
+    
+    # Producing fields in 3 columns
+    cols = st.columns(3)
+    
+    for i, field_name in enumerate(producing_fields):
+        with cols[i]:
+            field_config = NT_FIELDS[field_name]
+            field_metrics = metrics['fields'].get(field_name, {})
+            
+            if field_metrics.get('has_data', False):
+                # Calculate trend indicator
+                trend = field_metrics['trend']
+                if trend == 'up':
+                    trend_html = '<span class="trend-pill trend-up">↑ Rising</span>'
+                elif trend == 'down':
+                    trend_html = '<span class="trend-pill trend-down">↓ Falling</span>'
                 else:
-                    # Awaiting AEMO data
-                    st.markdown(f"### {field_name}")
-                    st.caption(f"{field_config['basin']} Basin • {field_config['operator']}")
-                    st.info("⏳ Awaiting AEMO GBB reporting")
+                    trend_html = '<span class="trend-pill trend-stable">→ Stable</span>'
+                
+                card_html = f"""
+                <div class="field-card">
+                    <div class="field-card-header">{field_name} {trend_html}</div>
+                    <div class="field-card-meta">{field_config['basin']} Basin</div>
+                    <div class="field-card-value">{field_metrics['current']:.1f} <span style="font-size: 0.6em; color: #666;">TJ/d</span></div>
+                    <div class="field-card-avg">7-day: {field_metrics['avg_7d']:.1f} TJ/d • 30-day: {field_metrics['avg_30d']:.1f} TJ/d</div>
+                </div>
+                """
+                st.markdown(card_html, unsafe_allow_html=True)
+            else:
+                # No data available (shouldn't happen for producing fields but handle gracefully)
+                card_html = f"""
+                <div class="field-card">
+                    <div class="field-card-header">{field_name}</div>
+                    <div class="field-card-meta">{field_config['basin']} Basin</div>
+                    <div class="field-card-avg" style="color: #999; font-style: italic;">No AEMO data available</div>
+                </div>
+                """
+                st.markdown(card_html, unsafe_allow_html=True)
+    
+    # Beetaloo emerging supply panel
+    beetaloo_html = """
+    <div class="beetaloo-panel">
+        <h4>Beetaloo Basin - Emerging Supply</h4>
+        <div class="subtitle">Shenandoah South • Carpentaria</div>
+        <div class="notice">Not yet included in AEMO Gas Bulletin Board reporting</div>
+    </div>
+    """
+    st.markdown(beetaloo_html, unsafe_allow_html=True)
 
 def render_nt_history_chart(metrics):
-    """Render stacked area chart of NT production history"""
+    """Render stacked area chart of NT production history with compact period selector"""
     st.markdown("---")
     st.subheader("NT Gas Production History")
     
@@ -521,27 +739,26 @@ def render_nt_history_chart(metrics):
         st.warning("No historical data available")
         return
     
-    # Period selection
-    col1, col2 = st.columns([3, 1])
-    
-    with col2:
-        period = st.selectbox(
-            "Time Period",
-            ["30 days", "3 months", "6 months", "1 year", "All"],
-            index=3
-        )
+    # Compact period selector using radio buttons styled horizontally
+    period = st.radio(
+        "Time Period",
+        ["1M", "3M", "6M", "1Y", "All"],
+        index=3,
+        horizontal=True,
+        label_visibility="collapsed"
+    )
     
     # Filter data by period
     df = metrics['daily_by_field'].copy()
     df = df.sort_values('gas_date')
     
-    if period == "30 days":
+    if period == "1M":
         cutoff = datetime.now() - timedelta(days=30)
-    elif period == "3 months":
+    elif period == "3M":
         cutoff = datetime.now() - timedelta(days=90)
-    elif period == "6 months":
+    elif period == "6M":
         cutoff = datetime.now() - timedelta(days=180)
-    elif period == "1 year":
+    elif period == "1Y":
         cutoff = datetime.now() - timedelta(days=365)
     else:
         cutoff = df['gas_date'].min()
@@ -574,21 +791,23 @@ def render_nt_history_chart(metrics):
         y=daily_total['supply'],
         name='Total NT Production',
         mode='lines',
-        line=dict(color='#1a1a1a', width=3),
+        line=dict(color='#1a1a1a', width=2.5),
         showlegend=True
     ))
     
     fig.update_layout(
-        height=500,
+        height=450,
         hovermode='x unified',
         xaxis_title='',
         yaxis_title='Production (TJ/day)',
+        margin=dict(t=10, b=40, l=50, r=20),
         legend=dict(
             orientation="h",
             yanchor="bottom",
-            y=1.02,
+            y=1.01,
             xanchor="right",
-            x=1
+            x=1,
+            font=dict(size=11)
         ),
         plot_bgcolor='white',
         paper_bgcolor='white',
@@ -599,12 +818,18 @@ def render_nt_history_chart(metrics):
     st.plotly_chart(fig, use_container_width=True)
 
 def render_basin_composition(metrics):
-    """Render basin-level production breakdown"""
+    """Render compact visual basin-level production breakdown"""
     st.markdown("---")
     st.subheader("Production by Basin")
     
     # Calculate basin totals
     basin_totals = {}
+    basin_colors = {
+        'Amadeus': '#e67e22',
+        'Bonaparte': '#3498db',
+        'Beetaloo': '#95a5a6'
+    }
+    
     for basin_name, basin_config in BASINS.items():
         total = sum(
             metrics['fields'].get(field, {}).get('current', 0)
@@ -615,93 +840,115 @@ def render_basin_composition(metrics):
     
     total_all = sum(basin_totals.values())
     
-    cols = st.columns(len(BASINS))
-    
-    for i, (basin_name, basin_config) in enumerate(BASINS.items()):
-        with cols[i]:
-            st.markdown(f"#### {basin_name} Basin")
+    if total_all > 0:
+        # Create horizontal composition bar
+        bar_html = '<div class="basin-bar">'
+        for basin_name, total in basin_totals.items():
+            if total > 0:
+                percentage = (total / total_all) * 100
+                color = basin_colors.get(basin_name, '#95a5a6')
+                bar_html += f'''
+                <div class="basin-segment" style="flex: {percentage}; background-color: {color};">
+                    {basin_name}<br>{total:.1f} TJ/d
+                </div>
+                '''
+        bar_html += '</div>'
+        
+        st.markdown(bar_html, unsafe_allow_html=True)
+        
+        # Legend with details
+        legend_html = '<div class="basin-legend">'
+        for basin_name, basin_config in BASINS.items():
+            total = basin_totals[basin_name]
+            percentage = (total / total_all * 100) if total_all > 0 else 0
+            color = basin_colors.get(basin_name, '#95a5a6')
             
-            basin_total = basin_totals[basin_name]
-            percentage = (basin_total / total_all * 100) if total_all > 0 else 0
+            # List producing fields
+            producing = [f for f in basin_config['fields'] 
+                        if metrics['fields'].get(f, {}).get('has_data', False)]
+            fields_text = ', '.join(producing) if producing else 'no active production'
             
-            st.metric(
-                label="Production",
-                value=f"{basin_total:.1f} TJ/d"
-            )
-            st.caption(f"**{percentage:.1f}%** of NT total")
-            
-            # List fields
-            for field in basin_config['fields']:
-                field_metrics = metrics['fields'].get(field, {})
-                if field_metrics.get('has_data', False):
-                    st.caption(f"• {field}: {field_metrics['current']:.1f} TJ/d")
-                else:
-                    st.caption(f"• {field}: awaiting data")
+            legend_html += f'''
+            <div class="basin-legend-item">
+                <div class="basin-color-box" style="background-color: {color};"></div>
+                <div>
+                    <strong>{basin_name} Basin:</strong> {total:.1f} TJ/d ({percentage:.0f}%)<br>
+                    <span style="font-size: 0.75rem; color: #888;">{fields_text}</span>
+                </div>
+            </div>
+            '''
+        legend_html += '</div>'
+        
+        st.markdown(legend_html, unsafe_allow_html=True)
+    else:
+        st.info("No production data available for basin breakdown")
 
 def render_field_analysis(metrics, nt_df):
-    """Render field comparison/analysis section"""
+    """Render compact field comparison/analysis section"""
     st.markdown("---")
-    st.subheader("Field Trends Analysis")
     
-    if nt_df.empty:
-        st.warning("No data available for field analysis")
-        return
-    
-    producing = get_producing_fields()
-    
-    if not producing:
-        st.info("No producing fields available for comparison")
-        return
-    
-    selected_fields = st.multiselect(
-        "Select fields to compare",
-        producing,
-        default=producing[:2] if len(producing) >= 2 else producing
-    )
-    
-    if not selected_fields:
-        st.info("Select one or more fields to view trends")
-        return
-    
-    # Create comparison chart
-    fig = go.Figure()
-    
-    for field_name in selected_fields:
-        field_data = nt_df[nt_df['nt_field'] == field_name].copy()
-        field_daily = field_data.groupby('gas_date')['supply'].sum().reset_index()
-        field_daily = field_daily.sort_values('gas_date')
+    with st.expander("Field Comparison Analysis", expanded=False):
+        if nt_df.empty:
+            st.info("No data available for field analysis")
+            return
         
-        fig.add_trace(go.Scatter(
-            x=field_daily['gas_date'],
-            y=field_daily['supply'],
-            name=field_name,
-            mode='lines',
-            line=dict(width=2, color=get_field_color(field_name))
-        ))
-    
-    fig.update_layout(
-        height=400,
-        hovermode='x unified',
-        xaxis_title='',
-        yaxis_title='Production (TJ/day)',
-        plot_bgcolor='white',
-        paper_bgcolor='white',
-        xaxis=dict(showgrid=True, gridcolor='#f0f0f0'),
-        yaxis=dict(showgrid=True, gridcolor='#f0f0f0'),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1
+        producing = get_producing_fields()
+        
+        if not producing:
+            st.info("No producing fields available for comparison")
+            return
+        
+        selected_fields = st.multiselect(
+            "Select fields",
+            producing,
+            default=producing[:2] if len(producing) >= 2 else producing
         )
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
+        
+        if not selected_fields:
+            st.info("Select one or more fields to view trends")
+            return
+        
+        # Create comparison chart
+        fig = go.Figure()
+        
+        for field_name in selected_fields:
+            field_data = nt_df[nt_df['nt_field'] == field_name].copy()
+            field_daily = field_data.groupby('gas_date')['supply'].sum().reset_index()
+            field_daily = field_daily.sort_values('gas_date')
+            
+            fig.add_trace(go.Scatter(
+                x=field_daily['gas_date'],
+                y=field_daily['supply'],
+                name=field_name,
+                mode='lines',
+                line=dict(width=2, color=get_field_color(field_name))
+            ))
+        
+        fig.update_layout(
+            height=350,
+            hovermode='x unified',
+            xaxis_title='',
+            yaxis_title='Production (TJ/day)',
+            margin=dict(t=10, b=40, l=50, r=20),
+            plot_bgcolor='white',
+            paper_bgcolor='white',
+            xaxis=dict(showgrid=True, gridcolor='#f0f0f0'),
+            yaxis=dict(showgrid=True, gridcolor='#f0f0f0'),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.01,
+                xanchor="right",
+                x=1,
+                font=dict(size=11)
+            )
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
 
 def render_admin_section(engine, session_maker):
     """Render collapsed admin/diagnostics section"""
-    with st.expander("🔧 Admin & Diagnostics"):
+    with st.expander("Admin & Diagnostics"):
         st.markdown("### Data Refresh")
         
         col1, col2 = st.columns([2, 1])
@@ -710,7 +957,7 @@ def render_admin_section(engine, session_maker):
             st.info("Refresh AEMO data to update the dashboard with latest production figures")
         
         with col2:
-            if st.button("🔄 Refresh AEMO Data", type="primary"):
+            if st.button("Refresh AEMO Data", type="primary"):
                 with st.spinner("Fetching latest AEMO data..."):
                     raw_df = fetch_aemo_data()
                     
@@ -721,11 +968,11 @@ def render_admin_section(engine, session_maker):
                             success = upsert_gbb_data(engine, session_maker, normalized_df)
                             
                             if success:
-                                st.success("✅ Data refreshed successfully")
+                                st.success("Data refreshed successfully")
                                 st.cache_data.clear()
                                 st.rerun()
                             else:
-                                st.error("❌ Failed to update database")
+                                st.error("Failed to update database")
         
         st.markdown("---")
         st.markdown("### Database Status")
@@ -749,14 +996,13 @@ def render_admin_section(engine, session_maker):
             
             # Diagnostic: Show actual NT-related facilities
             st.markdown("---")
-            st.markdown("### 🔍 Facility Diagnostics")
+            st.markdown("### Facility Diagnostics")
             
             # Get all unique states
             states_query = session.query(GBBRecord.state, func.count(GBBRecord.id)).group_by(GBBRecord.state).all()
             st.write("**States in database:**", dict(states_query))
             
             # Search for potential NT facilities by name patterns
-            search_terms = ['mereenie', 'palm valley', 'blacktip', 'yelcherr', 'yellerr', 'amadeus', 'bonaparte']
             matching_facilities = session.query(
                 GBBRecord.facility_name, 
                 GBBRecord.state, 
@@ -798,22 +1044,35 @@ def main():
     # Calculate metrics
     metrics = calculate_nt_metrics(nt_df)
     
-    # Render dashboard
+    # Render dashboard - prioritized visual hierarchy
     render_header(metrics)
     render_headline_kpi(metrics)
+    render_nt_history_chart(metrics)  # Moved up - dominant visual
     render_field_cards(metrics)
-    render_nt_history_chart(metrics)
     render_basin_composition(metrics)
-    render_field_analysis(metrics, nt_df)
-    
-    st.markdown("---")
+    render_field_analysis(metrics, nt_df)  # Optional deeper analysis at bottom
     
     # Admin section
     render_admin_section(engine, Session)
     
-    # Footer
-    st.markdown("<br><br>", unsafe_allow_html=True)
-    st.caption("Data source: AEMO Gas Bulletin Board • nemweb.com.au")
+    # Improved footer
+    footer_html = f"""
+    <div class="dashboard-footer">
+        <p><strong>Data Attribution:</strong> Gas production data sourced from the 
+        <a href="https://www.aemo.com.au/energy-systems/gas/gas-bulletin-board-gbb" target="_blank">AEMO Gas Bulletin Board</a> 
+        via <a href="https://nemweb.com.au/Reports/Current/GBB/" target="_blank">nemweb.com.au</a></p>
+        
+        <p><strong>Dashboard Information:</strong> This is an independent public dashboard displaying Northern Territory 
+        gas production data. Latest data: {metrics['latest_date'].strftime("%d %B %Y") if metrics['latest_date'] else "unavailable"}. 
+        The dashboard updates as AEMO publishes new Gas Bulletin Board reports.</p>
+        
+        <p style="font-size: 0.75rem; color: #999; margin-top: 0.5rem;">
+        Not affiliated with AEMO, gas producers, or government agencies. For official market information, 
+        consult <a href="https://www.aemo.com.au" target="_blank">aemo.com.au</a>
+        </p>
+    </div>
+    """
+    st.markdown(footer_html, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
