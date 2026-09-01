@@ -627,6 +627,140 @@ def calculate_nt_metrics(nt_df):
         'daily_by_field': daily_by_field
     }
 
+def calculate_basin_metrics(nt_df):
+    """
+    Calculate basin-level performance metrics from NT facility data.
+    Returns dict with basin-level current, averages, trends, and stability metrics.
+    """
+    if nt_df.empty:
+        return {}
+    
+    # Map each row to its basin
+    nt_df_copy = nt_df.copy()
+    nt_df_copy['basin'] = nt_df_copy['nt_field'].map(
+        lambda field: NT_FIELDS.get(field, {}).get('basin')
+    )
+    
+    # Filter to rows with valid basin mapping
+    basin_df = nt_df_copy[nt_df_copy['basin'].notna()].copy()
+    
+    if basin_df.empty:
+        return {}
+    
+    # Aggregate to basin-level daily production
+    daily_basin = basin_df.groupby(['gas_date', 'basin'])['supply'].sum().reset_index()
+    daily_basin = daily_basin.sort_values('gas_date')
+    
+    # Get latest date and total NT production
+    latest_date = daily_basin['gas_date'].max()
+    latest_basin = daily_basin[daily_basin['gas_date'] == latest_date]
+    total_nt_current = latest_basin['supply'].sum()
+    
+    basin_metrics = {}
+    
+    for basin_name in BASINS.keys():
+        basin_data = daily_basin[daily_basin['basin'] == basin_name].copy()
+        
+        if basin_data.empty:
+            # Basin has no production data
+            basin_metrics[basin_name] = {
+                'status': 'awaiting_data',
+                'current': 0,
+                'avg_30d': 0,
+                'nt_share': 0,
+                'change_90d': None,
+                'vs_peak_30d': None,
+                'stability': None,
+                'producing_days': 0,
+                'total_days': 0
+            }
+            continue
+        
+        # 1. Current production
+        current_data = basin_data[basin_data['gas_date'] == latest_date]
+        current = current_data['supply'].iloc[0] if not current_data.empty else 0
+        
+        # 2. 30-day average
+        last_30_days = basin_data.tail(30)
+        avg_30d = last_30_days['supply'].mean() if len(last_30_days) > 0 else 0
+        
+        # 3. NT Share
+        nt_share = (current / total_nt_current * 100) if total_nt_current > 0 else 0
+        
+        # 4. 90-day change (30d avg now vs 30d avg 90 days ago)
+        change_90d = None
+        if len(basin_data) >= 120:  # Need at least 120 days for this calc
+            # Current 30d average (already calculated)
+            # 30d average ending 90 days ago
+            cutoff_date = latest_date - pd.Timedelta(days=90)
+            historical_data = basin_data[basin_data['gas_date'] <= cutoff_date]
+            if len(historical_data) >= 30:
+                prev_30d_avg = historical_data.tail(30)['supply'].mean()
+                if prev_30d_avg > 0:
+                    change_90d = ((avg_30d / prev_30d_avg - 1) * 100)
+        
+        # 5. vs Peak 30d
+        vs_peak_30d = None
+        peak_30d_value = None
+        peak_30d_date = None
+        
+        if len(basin_data) >= 30:
+            # Calculate rolling 30d average for entire history
+            basin_data['rolling_30d'] = basin_data['supply'].rolling(window=30, min_periods=30).mean()
+            peak_row = basin_data.loc[basin_data['rolling_30d'].idxmax()]
+            peak_30d_value = peak_row['rolling_30d']
+            peak_30d_date = peak_row['gas_date']
+            
+            if peak_30d_value > 0:
+                vs_peak_30d = ((avg_30d / peak_30d_value - 1) * 100)
+        
+        # 6. Supply Stability (coefficient of variation over last 30 days)
+        stability = None
+        cv = None
+        producing_days = 0
+        
+        if len(last_30_days) >= 7:  # Need reasonable sample
+            mean_prod = last_30_days['supply'].mean()
+            std_prod = last_30_days['supply'].std()
+            
+            # Count producing days (production > 0)
+            producing_days = (last_30_days['supply'] > 0).sum()
+            total_days = len(last_30_days)
+            
+            if mean_prod > 0:
+                cv = (std_prod / mean_prod) * 100
+                
+                # Classify stability
+                if cv < 5:
+                    stability = "High"
+                elif cv < 15:
+                    stability = "Moderate"
+                else:
+                    stability = "Variable"
+        
+        # Determine status
+        if len(basin_data) < 7:
+            status = 'establishing'
+        else:
+            status = 'active'
+        
+        basin_metrics[basin_name] = {
+            'status': status,
+            'current': current,
+            'avg_30d': avg_30d,
+            'nt_share': nt_share,
+            'change_90d': change_90d,
+            'vs_peak_30d': vs_peak_30d,
+            'peak_30d_value': peak_30d_value,
+            'peak_30d_date': peak_30d_date,
+            'stability': stability,
+            'cv': cv,
+            'producing_days': producing_days,
+            'total_days': len(last_30_days)
+        }
+    
+    return basin_metrics
+
 # ============================================================================
 # Rendering Functions
 # ============================================================================
@@ -879,6 +1013,152 @@ def render_basin_composition(metrics):
     else:
         st.info("No production data available for basin breakdown")
 
+def render_basin_performance(basin_metrics):
+    """Render basin-level performance comparison metrics"""
+    st.markdown("---")
+    st.subheader("Basin Performance")
+    
+    if not basin_metrics:
+        st.info("Insufficient data for basin performance analysis")
+        return
+    
+    # Define basin display order
+    basin_order = ['Amadeus', 'Bonaparte', 'Beetaloo']
+    basin_colors = {
+        'Amadeus': '#e67e22',
+        'Bonaparte': '#3498db',
+        'Beetaloo': '#95a5a6'
+    }
+    
+    # Create performance table
+    for basin_name in basin_order:
+        if basin_name not in basin_metrics:
+            continue
+        
+        metrics = basin_metrics[basin_name]
+        color = basin_colors.get(basin_name, '#666')
+        
+        # Basin header with color indicator
+        st.markdown(f'<div style="margin-top: 1rem; margin-bottom: 0.5rem;"><span style="display: inline-block; width: 4px; height: 18px; background-color: {color}; margin-right: 8px; border-radius: 2px; vertical-align: middle;"></span><strong style="font-size: 1.1rem; color: #1a1a1a;">{basin_name.upper()} BASIN</strong></div>', unsafe_allow_html=True)
+        
+        # Handle different statuses
+        if metrics['status'] == 'awaiting_data':
+            st.caption("⏳ Awaiting production data")
+            continue
+        
+        if metrics['status'] == 'establishing':
+            st.caption("📊 Establishing baseline (fewer than 7 days of data)")
+            if metrics['current'] > 0:
+                st.caption(f"Current production: {metrics['current']:.1f} TJ/d")
+            continue
+        
+        # Create metric columns
+        cols = st.columns([1.2, 1.2, 0.9, 1.3, 1.3, 1.4])
+        
+        with cols[0]:
+            st.metric("Current", f"{metrics['current']:.1f} TJ/d")
+        
+        with cols[1]:
+            st.metric("30d Avg", f"{metrics['avg_30d']:.1f} TJ/d")
+        
+        with cols[2]:
+            st.metric("NT Share", f"{metrics['nt_share']:.1f}%")
+        
+        with cols[3]:
+            # 90d Change
+            if metrics['change_90d'] is not None:
+                change = metrics['change_90d']
+                if abs(change) < 1:
+                    direction = "→"
+                    color_class = "#666"
+                elif change > 0:
+                    direction = "↑"
+                    color_class = "#155724"
+                else:
+                    direction = "↓"
+                    color_class = "#721c24"
+                
+                st.markdown(f'<div style="font-size: 0.85rem; font-weight: 500; color: #666; margin-bottom: 0.25rem;">90d Change</div><div style="font-size: 1.8rem; font-weight: 700; color: {color_class};">{direction} {abs(change):.1f}%</div>', unsafe_allow_html=True)
+            else:
+                st.markdown('<div style="font-size: 0.85rem; font-weight: 500; color: #666; margin-bottom: 0.25rem;">90d Change</div><div style="font-size: 0.9rem; color: #999; font-style: italic;">Insufficient history</div>', unsafe_allow_html=True)
+        
+        with cols[4]:
+            # vs Peak 30d
+            if metrics['vs_peak_30d'] is not None:
+                peak_pct = metrics['vs_peak_30d']
+                peak_val = metrics.get('peak_30d_value', 0)
+                peak_date = metrics.get('peak_30d_date')
+                
+                if peak_date and isinstance(peak_date, pd.Timestamp):
+                    peak_date_str = peak_date.strftime("%d %b %Y")
+                    tooltip = f"Peak 30d avg: {peak_val:.1f} TJ/d on {peak_date_str}"
+                else:
+                    tooltip = f"Peak 30d avg: {peak_val:.1f} TJ/d"
+                
+                st.markdown(f'<div style="font-size: 0.85rem; font-weight: 500; color: #666; margin-bottom: 0.25rem;">vs Peak 30d</div><div style="font-size: 1.8rem; font-weight: 700; color: #666;" title="{tooltip}">{peak_pct:+.1f}%</div>', unsafe_allow_html=True)
+            else:
+                st.markdown('<div style="font-size: 0.85rem; font-weight: 500; color: #666; margin-bottom: 0.25rem;">vs Peak 30d</div><div style="font-size: 0.9rem; color: #999; font-style: italic;">Establishing baseline</div>', unsafe_allow_html=True)
+        
+        with cols[5]:
+            # Supply Stability
+            if metrics['stability']:
+                stability_colors = {
+                    'High': '#155724',
+                    'Moderate': '#856404',
+                    'Variable': '#721c24'
+                }
+                stab_color = stability_colors.get(metrics['stability'], '#666')
+                cv_val = metrics.get('cv', 0)
+                prod_days = metrics.get('producing_days', 0)
+                total_days = metrics.get('total_days', 0)
+                
+                tooltip = f"Producing days: {prod_days}/{total_days} days. Supply Stability measures variability in reported daily production over the latest 30 days. It does not represent facility availability or reservoir performance."
+                
+                st.markdown(f'<div style="font-size: 0.85rem; font-weight: 500; color: #666; margin-bottom: 0.25rem;">Supply Stability ℹ️</div><div style="font-size: 1.1rem; font-weight: 700; color: {stab_color};" title="{tooltip}">{metrics["stability"]}</div><div style="font-size: 0.8rem; color: #666;">CV {cv_val:.1f}%</div>', unsafe_allow_html=True)
+            else:
+                st.markdown('<div style="font-size: 0.85rem; font-weight: 500; color: #666; margin-bottom: 0.25rem;">Supply Stability</div><div style="font-size: 0.9rem; color: #999;">N/A</div>', unsafe_allow_html=True)
+    
+    # Add methodology note
+    with st.expander("📖 Basin Performance Methodology"):
+        st.markdown("""
+        **Basin Performance Metrics - Calculation Methods**
+        
+        All calculations are based exclusively on actual AEMO Gas Bulletin Board production data. 
+        No values are fabricated for facilities that have not begun reporting.
+        
+        **Current**: Latest reported daily basin production (TJ/d) from the most recent gas date.
+        
+        **30d Avg**: Arithmetic mean of total daily basin production over the latest 30 gas days. 
+        Production is first aggregated to basin/day, then averaged.
+        
+        **NT Share**: Basin's percentage of total NT gas production on the latest gas date:  
+        `(basin current / total NT current) × 100`
+        
+        **90d Change**: Compares the latest 30-day average with the 30-day average ending 90 days earlier.  
+        `(current 30d avg / previous 30d avg - 1) × 100`  
+        Direction indicators: ↑ positive change, ↓ negative change, → approximately unchanged (±1%)  
+        Requires at least 120 days of history. Designed to show trend without single-day volatility.
+        
+        **vs Peak 30d**: Current 30-day average compared to the highest historical 30-day rolling average:  
+        `(current 30d avg / historical peak 30d avg - 1) × 100`  
+        Typically 0% or negative. Peak uses 30-day rolling average, not single highest day.
+        
+        **Supply Stability**: Measures consistency of reported daily production over 30 days using coefficient of variation (CV):  
+        `CV = (standard deviation / mean) × 100`  
+        - **High** = CV < 5%
+        - **Moderate** = CV 5-15%  
+        - **Variable** = CV > 15%
+        
+        ⚠️ **Important**: Supply Stability describes variability in reported AEMO production data only. 
+        It does NOT measure facility reliability, plant availability, or reservoir performance.
+        Production can vary due to market conditions, maintenance schedules, or operational decisions.
+        
+        **Status Indicators**:
+        - **Awaiting production data**: No AEMO GBB data available for this basin yet
+        - **Establishing baseline**: Fewer than 7 days of production data available
+        - **Insufficient history**: Fewer than required days for specific metric (e.g., 120 days for 90d Change)
+        """)
+
 def render_field_analysis(metrics, nt_df):
     """Render compact field comparison/analysis section"""
     st.markdown("---")
@@ -1034,11 +1314,60 @@ def main():
     # Initialize database
     engine, Session = get_database_connection()
     
+    # Auto-fetch AEMO data on first load or if data is stale
+    try:
+        session = Session()
+        record_count = session.query(GBBRecord).count()
+        
+        # Check if we need to fetch data
+        should_fetch = False
+        
+        if record_count == 0:
+            # No data at all - definitely fetch
+            should_fetch = True
+            fetch_reason = "No data in database"
+        else:
+            # Check if data is stale (older than 24 hours)
+            latest_import = session.query(func.max(GBBRecord.imported_date)).scalar()
+            if latest_import:
+                hours_since_import = (datetime.now() - latest_import).total_seconds() / 3600
+                if hours_since_import > 24:
+                    should_fetch = True
+                    fetch_reason = f"Data is {hours_since_import:.1f} hours old"
+        
+        session.close()
+        
+        # Auto-fetch if needed
+        if should_fetch:
+            with st.spinner(f"Loading AEMO data... ({fetch_reason})"):
+                raw_df = fetch_aemo_data()
+                
+                if raw_df is not None:
+                    normalized_df = normalize_aemo_data(raw_df)
+                    
+                    if normalized_df is not None:
+                        success = upsert_gbb_data(engine, Session, normalized_df)
+                        
+                        if success:
+                            st.success("✅ AEMO data loaded successfully")
+                            # Clear cache to ensure fresh calculations
+                            st.cache_data.clear()
+                        else:
+                            st.warning("⚠️ Failed to load AEMO data - dashboard may show incomplete information")
+                else:
+                    st.warning("⚠️ Unable to fetch AEMO data - dashboard may show incomplete information")
+    
+    except Exception as e:
+        st.warning(f"⚠️ Auto-fetch check failed: {str(e)}")
+    
     # Get NT data
     nt_df = get_nt_data(Session)
     
     # Calculate metrics
     metrics = calculate_nt_metrics(nt_df)
+    
+    # Calculate basin-level performance metrics
+    basin_metrics = calculate_basin_metrics(nt_df)
     
     # Render dashboard - prioritized visual hierarchy
     render_header(metrics)
@@ -1046,6 +1375,7 @@ def main():
     render_nt_history_chart(metrics)  # Moved up - dominant visual
     render_field_cards(metrics)
     render_basin_composition(metrics)
+    render_basin_performance(basin_metrics)  # New basin performance section
     render_field_analysis(metrics, nt_df)  # Optional deeper analysis at bottom
     
     # Admin section
