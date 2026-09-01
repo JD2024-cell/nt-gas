@@ -31,14 +31,14 @@ NT_FIELDS = {
     },
     "Shenandoah South": {
         "basin": "Beetaloo",
-        "aemo_match": ["Shenandoah", "Tamboran"],  # Potential future names
+        "aemo_match": ["Shenandoah", "Tamboran", "Sturt Plateau"],  # AEMO facility names
         "status": "awaiting_aemo",
         "operator": "Tamboran Resources",
         "color": "#F39C12"  # Orange
     },
     "Carpentaria": {
         "basin": "Beetaloo",
-        "aemo_match": ["Carpentaria", "Beetaloo Energy"],  # Potential future names
+        "aemo_match": ["Carpentaria", "Beetaloo Energy"],  # AEMO facility names
         "status": "awaiting_aemo",
         "operator": "Beetaloo Energy Australia",
         "color": "#9B59B6"  # Purple
