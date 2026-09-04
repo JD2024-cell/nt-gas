@@ -87,6 +87,20 @@ st.markdown("""
         text-transform: uppercase;
         letter-spacing: 0.5px;
     }
+
+    [data-testid="stHorizontalBlock"] > [data-testid="column"]:first-child [data-testid="stMetricValue"] {
+        font-size: 3.5rem;
+        font-weight: 800;
+        color: #0066cc;
+    }
+
+    [data-testid="stHorizontalBlock"] > [data-testid="column"]:first-child [data-testid="stMetricLabel"] {
+        font-size: 1.1rem;
+        font-weight: 600;
+        color: #333;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
     
     /* Standard metrics */
     [data-testid="stMetricValue"] {
@@ -813,13 +827,11 @@ def render_headline_kpi(metrics):
             change_vs_7d = metrics['total_current'] - metrics['avg_7d_total']
             delta_text = f"{change_vs_7d:+.1f} TJ/d vs 7-day avg"
         
-        st.markdown('<div class="primary-kpi">', unsafe_allow_html=True)
         st.metric(
             label="Total NT Gas Production",
             value=f"{metrics['total_current']:.1f} TJ/d",
             delta=delta_text
         )
-        st.markdown('</div>', unsafe_allow_html=True)
     
     with col2:
         st.metric(
@@ -839,12 +851,8 @@ def render_field_cards(metrics, nt_df):
     st.markdown("---")
     st.subheader("Field Production")
     
-    # Separate producing fields and Beetaloo awaiting fields
-    producing_fields = ['Mereenie', 'Palm Valley', 'Blacktip']
-    beetaloo_fields = ['Shenandoah South', 'Carpentaria']
-    
-    # Producing fields in 3 columns
-    cols = st.columns(3)
+    producing_fields = get_producing_fields()
+    cols = st.columns(len(producing_fields))
     
     for i, field_name in enumerate(producing_fields):
         with cols[i]:
@@ -881,23 +889,6 @@ def render_field_cards(metrics, nt_df):
                 """
                 st.markdown(card_html, unsafe_allow_html=True)
     
-    # Beetaloo emerging supply panel
-    sturt_data = nt_df[nt_df['facility_name'].str.upper() == 'SPCF']
-    if sturt_data.empty:
-        notice = "Sturt Plateau Gas Plant (SPCF) is not yet listed in the imported AEMO data"
-    else:
-        latest_sturt_date = sturt_data['gas_date'].max()
-        latest_sturt = sturt_data[sturt_data['gas_date'] == latest_sturt_date]['supply'].sum()
-        notice = f"Sturt Plateau Gas Plant (SPCF) is listed by AEMO; latest reported supply: {latest_sturt:.1f} TJ/d"
-
-    beetaloo_html = f"""
-    <div class="beetaloo-panel">
-        <h4>Beetaloo Basin - Emerging Supply</h4>
-        <div class="subtitle">Shenandoah South • Carpentaria</div>
-        <div class="notice">{notice}</div>
-    </div>
-    """
-    st.markdown(beetaloo_html, unsafe_allow_html=True)
 
 def render_nt_history_chart(metrics):
     """Render stacked area chart of NT production history with compact period selector"""
