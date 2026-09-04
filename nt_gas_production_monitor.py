@@ -531,6 +531,24 @@ def get_nt_data(session_maker):
         st.error(f"Failed to retrieve NT data: {str(e)}")
         return pd.DataFrame()
 
+@st.cache_data(ttl=300, show_spinner=False)
+def get_cached_nt_data(database_url):
+    """Cache the mapped NT dataframe between chart interactions."""
+    engine_options = {}
+    if database_url.startswith("sqlite"):
+        engine_options["connect_args"] = {
+            "timeout": 60,
+            "check_same_thread": False
+        }
+        engine_options["poolclass"] = NullPool
+
+    engine = create_engine(database_url, **engine_options)
+    session_maker = sessionmaker(bind=engine)
+    try:
+        return get_nt_data(session_maker)
+    finally:
+        engine.dispose()
+
 # ============================================================================
 # Metrics Calculation
 # ============================================================================
@@ -1347,6 +1365,7 @@ def main():
     
     # Initialize database
     engine, Session = get_database_connection()
+    database_url = os.environ.get('DATABASE_URL')
     
     # Auto-fetch AEMO data on first load or if data is stale
     try:
@@ -1394,8 +1413,8 @@ def main():
     except Exception as e:
         st.warning(f"⚠️ Auto-fetch check failed: {str(e)}")
     
-    # Get NT data
-    nt_df = get_nt_data(Session)
+    # Get cached NT data; chart interactions do not re-query the database
+    nt_df = get_cached_nt_data(database_url)
     
     # Calculate metrics
     metrics = calculate_nt_metrics(nt_df)
