@@ -1179,22 +1179,39 @@ def render_basin_performance(basin_metrics):
 def render_field_analysis(metrics, nt_df):
     """Render compact field comparison/analysis section"""
     st.markdown("---")
+    st.subheader("Field Comparison Analysis")
     
-    with st.expander("Field Comparison Analysis", expanded=False):
+    with st.expander("Chart Controls", expanded=True):
         if nt_df.empty:
             st.info("No data available for field analysis")
             return
         
-        producing = get_producing_fields()
+        available_fields = set(nt_df['nt_field'].dropna().unique())
+        producing = [
+            field_name for field_name in FIELD_DISPLAY_ORDER
+            if field_name in available_fields
+        ]
         
         if not producing:
             st.info("No producing fields available for comparison")
             return
         
+        default_fields = [
+            field_name for field_name in ["Shenandoah South", "Blacktip"]
+            if field_name in producing
+        ]
+        if not default_fields:
+            default_fields = producing[:2]
+
         selected_fields = st.multiselect(
             "Select fields",
             producing,
-            default=producing[:2] if len(producing) >= 2 else producing
+            default=default_fields,
+            format_func=lambda field_name: (
+                "Sturt Plateau / Shenandoah South"
+                if field_name == "Shenandoah South"
+                else field_name
+            )
         )
         
         if not selected_fields:
