@@ -31,7 +31,7 @@ NT_FIELDS = {
     },
     "Shenandoah South": {
         "basin": "Beetaloo",
-        "aemo_match": ["Shenandoah", "Tamboran", "Sturt Plateau"],  # AEMO facility names
+        "aemo_match": ["Shenandoah", "Tamboran", "Sturt Plateau", "SPCF"],  # AEMO facility names and code
         "status": "awaiting_aemo",
         "operator": "Tamboran Resources",
         "color": "#F39C12"  # Orange
@@ -93,13 +93,17 @@ def get_field_for_facility(facility_name):
     return None
 
 def get_producing_fields():
-    """Return list of fields with status='producing'"""
+    """Return list of fields currently producing (have AEMO data)"""
     return [name for name, config in NT_FIELDS.items() if config["status"] == "producing"]
 
 def get_awaiting_fields():
-    """Return list of fields with status='awaiting_aemo'"""
+    """Return list of fields awaiting AEMO reporting"""
     return [name for name, config in NT_FIELDS.items() if config["status"] == "awaiting_aemo"]
 
 def get_field_color(field_name):
-    """Get display color for a field"""
-    return NT_FIELDS.get(field_name, {}).get("color", "#95a5a6")
+    """Get the display color for a field"""
+    return NT_FIELDS.get(field_name, {}).get("color", "#95A5A6")
+
+def get_basin_fields(basin_name):
+    """Get all fields in a basin"""
+    return BASINS.get(basin_name, {}).get("fields", [])
