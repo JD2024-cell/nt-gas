@@ -29,10 +29,10 @@ NT_FIELDS = {
         "operator": "Various",
         "color": "#2ECC71"  # Green
     },
-    "Shenandoah South": {
+    "Sturt Plateau Gas Plant": {
         "basin": "Beetaloo",
-        "aemo_match": ["Shenandoah", "Tamboran", "Sturt Plateau", "SPCF"],  # AEMO facility names and code
-        "status": "awaiting_aemo",
+        "aemo_match": ["Sturt Plateau", "SPCF"],  # AEMO facility name and code
+        "status": "producing",
         "operator": "Tamboran Resources",
         "color": "#F39C12"  # Orange
     },
@@ -56,7 +56,7 @@ BASINS = {
         "color": "#16A085"
     },
     "Beetaloo": {
-        "fields": ["Shenandoah South", "Carpentaria"],
+        "fields": ["Sturt Plateau Gas Plant", "Carpentaria"],
         "color": "#8E44AD"
     }
 }
@@ -66,7 +66,7 @@ FIELD_DISPLAY_ORDER = [
     "Mereenie",
     "Palm Valley", 
     "Blacktip",
-    "Shenandoah South",
+    "Sturt Plateau Gas Plant",
     "Carpentaria"
 ]
 
