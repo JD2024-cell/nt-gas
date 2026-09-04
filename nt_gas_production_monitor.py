@@ -816,7 +816,7 @@ def render_headline_kpi(metrics):
             value=str(producing_count)
         )
 
-def render_field_cards(metrics):
+def render_field_cards(metrics, nt_df):
     """Render compact professional field production cards"""
     st.markdown("---")
     st.subheader("Field Production")
@@ -864,11 +864,19 @@ def render_field_cards(metrics):
                 st.markdown(card_html, unsafe_allow_html=True)
     
     # Beetaloo emerging supply panel
-    beetaloo_html = """
+    sturt_data = nt_df[nt_df['facility_name'].str.upper() == 'SPCF']
+    if sturt_data.empty:
+        notice = "Sturt Plateau Gas Plant (SPCF) is not yet listed in the imported AEMO data"
+    else:
+        latest_sturt_date = sturt_data['gas_date'].max()
+        latest_sturt = sturt_data[sturt_data['gas_date'] == latest_sturt_date]['supply'].sum()
+        notice = f"Sturt Plateau Gas Plant (SPCF) is listed by AEMO; latest reported supply: {latest_sturt:.1f} TJ/d"
+
+    beetaloo_html = f"""
     <div class="beetaloo-panel">
         <h4>Beetaloo Basin - Emerging Supply</h4>
         <div class="subtitle">Shenandoah South • Carpentaria</div>
-        <div class="notice">Not yet included in AEMO Gas Bulletin Board reporting</div>
+        <div class="notice">{notice}</div>
     </div>
     """
     st.markdown(beetaloo_html, unsafe_allow_html=True)
@@ -1382,7 +1390,7 @@ def main():
     render_header(metrics)
     render_headline_kpi(metrics)
     render_nt_history_chart(metrics)  # Moved up - dominant visual
-    render_field_cards(metrics)
+    render_field_cards(metrics, nt_df)
     render_basin_composition(metrics)
     render_basin_performance(basin_metrics)  # New basin performance section
     render_field_analysis(metrics, nt_df)  # Optional deeper analysis at bottom
