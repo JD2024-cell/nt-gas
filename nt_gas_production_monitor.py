@@ -20,6 +20,7 @@ import os
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, UniqueConstraint
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.sql import func
+from sqlalchemy.pool import NullPool
 
 # Local configuration
 from nt_config import (
@@ -346,7 +347,15 @@ def get_database_connection():
             st.error("⚠️ DATABASE_URL environment variable not configured")
             st.stop()
         
-        engine = create_engine(database_url)
+        engine_options = {}
+        if database_url.startswith("sqlite"):
+            engine_options["connect_args"] = {
+                "timeout": 60,
+                "check_same_thread": False
+            }
+            engine_options["poolclass"] = NullPool
+
+        engine = create_engine(database_url, **engine_options)
         Base.metadata.create_all(engine)
         Session = sessionmaker(bind=engine)
         return engine, Session
