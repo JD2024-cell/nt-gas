@@ -415,7 +415,8 @@ def fetch_aemo_data():
                 if 'LastUpdated' in df.columns:
                     df['LastUpdated'] = pd.to_datetime(df['LastUpdated'])
                 
-                return df
+                # This app only needs NT production; avoid caching the full national report.
+                return df[df['State'].eq('NT')].copy()
                 
     except Exception as e:
         st.error(f"Failed to fetch AEMO data: {str(e)}")
@@ -516,7 +517,9 @@ def get_nt_data(session_maker):
     session = None
     try:
         session = session_maker()
-        records = session.query(GBBRecord).all()
+        records = session.query(GBBRecord).filter(
+            GBBRecord.state == 'NT'
+        ).all()
         session.close()
         
         if not records:
@@ -1336,11 +1339,13 @@ def render_admin_section(engine, session_maker):
                 GBBRecord.facility_type,
                 func.count(GBBRecord.id).label('count')
             ).filter(
+                (GBBRecord.state == 'NT') & (
                 func.lower(GBBRecord.facility_name).contains('mereenie') |
                 func.lower(GBBRecord.facility_name).contains('palm') |
                 func.lower(GBBRecord.facility_name).contains('blacktip') |
                 func.lower(GBBRecord.facility_name).contains('yelcherr') |
                 func.lower(GBBRecord.facility_name).contains('yellerr')
+                )
             ).group_by(GBBRecord.facility_name, GBBRecord.state, GBBRecord.facility_type).all()
             
             if matching_facilities:
