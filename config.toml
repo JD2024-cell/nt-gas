@@ -1,5 +1,3 @@
 [server]
 fileWatcherType = "none"
-
-[runner]
-fastReruns = true
+runOnSave = false
