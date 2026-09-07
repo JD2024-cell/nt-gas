@@ -1,5 +1,5 @@
 [server]
-fileWatcherType = "poll"
+fileWatcherType = "none"
 
 [runner]
 fastReruns = true
