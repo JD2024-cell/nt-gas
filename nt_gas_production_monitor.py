@@ -615,14 +615,14 @@ def calculate_nt_metrics(nt_df):
             'daily_by_field': pd.DataFrame()
         }
     
-    # Get latest gas date
+    # Use each field's latest available AEMO gas day; facilities can publish on different schedules.
     latest_date = nt_df['gas_date'].max()
-    
-    # Latest production by field
-    latest_data = nt_df[nt_df['gas_date'] == latest_date]
-    
-    # Group by field and sum (in case multiple facilities map to same field)
-    field_current = latest_data.groupby('nt_field')['supply'].sum().to_dict()
+    field_current = {}
+    for field_name, field_data in nt_df.groupby('nt_field'):
+        field_latest_date = field_data['gas_date'].max()
+        field_current[field_name] = field_data.loc[
+            field_data['gas_date'].eq(field_latest_date), 'supply'
+        ].sum()
     
     # Daily totals over time
     daily_by_field = nt_df.groupby(['gas_date', 'nt_field'])['supply'].sum().reset_index()
@@ -724,10 +724,17 @@ def calculate_basin_metrics(nt_df):
     daily_basin = basin_df.groupby(['gas_date', 'basin'])['supply'].sum().reset_index()
     daily_basin = daily_basin.sort_values('gas_date')
     
-    # Get latest date and total NT production
-    latest_date = daily_basin['gas_date'].max()
-    latest_basin = daily_basin[daily_basin['gas_date'] == latest_date]
-    total_nt_current = latest_basin['supply'].sum()
+    # Facilities can publish on different schedules, so use each basin's latest available day.
+    basin_latest_dates = daily_basin.groupby('basin')['gas_date'].max().to_dict()
+    basin_current_values = {
+        basin_name: daily_basin.loc[
+            daily_basin['basin'].eq(basin_name)
+            & daily_basin['gas_date'].eq(basin_latest_dates[basin_name]),
+            'supply'
+        ].sum()
+        for basin_name in basin_latest_dates
+    }
+    total_nt_current = sum(basin_current_values.values())
     
     basin_metrics = {}
     
@@ -750,6 +757,7 @@ def calculate_basin_metrics(nt_df):
             continue
         
         # 1. Current production
+        latest_date = basin_latest_dates[basin_name]
         current_data = basin_data[basin_data['gas_date'] == latest_date]
         current = current_data['supply'].iloc[0] if not current_data.empty else 0
         
