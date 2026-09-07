@@ -409,7 +409,10 @@ def fetch_aemo_data():
             with zip_file.open(csv_files[0]) as csv_file:
                 nt_chunks = []
                 for chunk in pd.read_csv(csv_file, chunksize=50000):
-                    nt_chunk = chunk[chunk['State'].eq('NT')].copy()
+                    nt_chunk = chunk[
+                        chunk['State'].eq('NT') &
+                        chunk['FacilityType'].eq('PROD')
+                    ].copy()
                     if not nt_chunk.empty:
                         nt_chunks.append(nt_chunk)
 
