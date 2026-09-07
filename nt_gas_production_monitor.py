@@ -481,18 +481,20 @@ def upsert_gbb_data(engine, session_maker, df):
     
     try:
         session = session_maker()
-        records = df.to_dict('records')
 
         if session.query(GBBRecord).count() == 0:
-            batch_size = 2000
-            for start in range(0, len(records), batch_size):
+            batch_size = 1000
+            for start in range(0, len(df), batch_size):
+                records = df.iloc[start:start + batch_size].to_dict('records')
                 session.bulk_insert_mappings(
                     GBBRecord,
-                    records[start:start + batch_size]
+                    records
                 )
                 session.commit()
             session.close()
             return True
+
+        records = df.to_dict('records')
         
         for record in records:
             # Check if record exists
