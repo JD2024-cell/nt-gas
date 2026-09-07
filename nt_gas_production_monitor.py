@@ -5,6 +5,10 @@ Public-facing dashboard for Northern Territory gas production monitoring.
 Data source: AEMO Gas Bulletin Board via nemweb.com.au
 """
 
+import os
+
+os.environ.setdefault("STREAMLIT_SERVER_FILE_WATCHER_TYPE", "none")
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -14,8 +18,6 @@ import zipfile
 import io
 from io import StringIO
 from datetime import datetime, timedelta
-import os
-
 # Database imports
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, UniqueConstraint
 from sqlalchemy.orm import sessionmaker, declarative_base
