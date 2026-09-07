@@ -481,8 +481,13 @@ def upsert_gbb_data(engine, session_maker, df):
         records = df.to_dict('records')
 
         if session.query(GBBRecord).count() == 0:
-            session.bulk_insert_mappings(GBBRecord, records)
-            session.commit()
+            batch_size = 2000
+            for start in range(0, len(records), batch_size):
+                session.bulk_insert_mappings(
+                    GBBRecord,
+                    records[start:start + batch_size]
+                )
+                session.commit()
             session.close()
             return True
         
@@ -1402,12 +1407,15 @@ def main():
         # Auto-fetch if needed
         if should_fetch:
             with st.spinner(f"Loading AEMO data... ({fetch_reason})"):
+                st.caption("Downloading and filtering NT AEMO records...")
                 raw_df = fetch_aemo_data()
                 
                 if raw_df is not None:
+                    st.caption(f"Preparing {len(raw_df):,} NT records for database import...")
                     normalized_df = normalize_aemo_data(raw_df)
                     
                     if normalized_df is not None:
+                        st.caption("Saving NT records to PostgreSQL in batches...")
                         success = upsert_gbb_data(engine, Session, normalized_df)
                         
                         if success:
