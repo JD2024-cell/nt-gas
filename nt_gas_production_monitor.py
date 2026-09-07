@@ -370,6 +370,12 @@ def get_database_connection():
                 "check_same_thread": False
             }
             engine_options["poolclass"] = NullPool
+        elif database_url.startswith("postgresql"):
+            engine_options["connect_args"] = {
+                "connect_timeout": 15,
+                "sslmode": "require"
+            }
+            engine_options["pool_pre_ping"] = True
 
         engine = create_engine(database_url, **engine_options)
         Base.metadata.create_all(engine)
@@ -1383,6 +1389,7 @@ def main():
     """Main application entry point"""
     
     # Initialize database
+    st.info("Connecting to the production database...")
     engine, Session = get_database_connection()
     database_url = os.environ.get('DATABASE_URL')
     
