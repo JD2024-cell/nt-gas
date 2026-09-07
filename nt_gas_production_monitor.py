@@ -407,16 +407,21 @@ def fetch_aemo_data():
                 return None
             
             with zip_file.open(csv_files[0]) as csv_file:
-                csv_content = csv_file.read().decode('utf-8')
-                df = pd.read_csv(StringIO(csv_content))
-                
-                # Parse dates
+                nt_chunks = []
+                for chunk in pd.read_csv(csv_file, chunksize=50000):
+                    nt_chunk = chunk[chunk['State'].eq('NT')].copy()
+                    if not nt_chunk.empty:
+                        nt_chunks.append(nt_chunk)
+
+                if not nt_chunks:
+                    return None
+
+                df = pd.concat(nt_chunks, ignore_index=True)
                 df['GasDate'] = pd.to_datetime(df['GasDate'])
                 if 'LastUpdated' in df.columns:
                     df['LastUpdated'] = pd.to_datetime(df['LastUpdated'])
-                
-                # This app only needs NT production; avoid caching the full national report.
-                return df[df['State'].eq('NT')].copy()
+
+                return df
                 
     except Exception as e:
         st.error(f"Failed to fetch AEMO data: {str(e)}")
