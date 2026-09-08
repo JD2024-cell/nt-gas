@@ -16,6 +16,7 @@ import plotly.graph_objects as go
 import requests
 import zipfile
 import io
+import logging
 from io import StringIO
 from datetime import datetime, timedelta
 # Database imports
@@ -30,6 +31,8 @@ from nt_config import (
     get_field_for_facility, get_producing_fields, 
     get_awaiting_fields, get_field_color
 )
+
+logger = logging.getLogger(__name__)
 
 # Page configuration
 st.set_page_config(
@@ -607,39 +610,52 @@ def calculate_nt_metrics(nt_df):
     if nt_df.empty:
         return {
             'latest_date': None,
+            'common_date': None,
+            'included_sources': [],
             'total_current': 0,
+            'total_complete': False,
             'change_vs_prev': 0,
             'avg_7d_total': 0,
+            'avg_30d_total': 0,
             'fields': {},
             'daily_total': pd.DataFrame(),
-            'daily_by_field': pd.DataFrame()
+            'daily_by_field': pd.DataFrame(),
+            'qc_table': pd.DataFrame()
         }
     
-    # Use each field's latest available AEMO gas day; facilities can publish on different schedules.
+    # Aggregate each mapped source by gas date without filling missing dates.
     latest_date = nt_df['gas_date'].max()
-    field_current = {}
-    for field_name, field_data in nt_df.groupby('nt_field'):
-        field_latest_date = field_data['gas_date'].max()
-        field_current[field_name] = field_data.loc[
-            field_data['gas_date'].eq(field_latest_date), 'supply'
-        ].sum()
-    
-    # Daily totals over time
-    daily_by_field = nt_df.groupby(['gas_date', 'nt_field'])['supply'].sum().reset_index()
-    daily_total = daily_by_field.groupby('gas_date')['supply'].sum().reset_index()
-    daily_total.columns = ['gas_date', 'total_supply']
+    source_names = [
+        field for field in FIELD_DISPLAY_ORDER
+        if field in set(nt_df['nt_field'].dropna().unique())
+    ]
+    source_daily = (
+        nt_df.dropna(subset=['gas_date', 'supply'])
+        .groupby(['gas_date', 'nt_field'], as_index=False)['supply']
+        .sum()
+        .sort_values(['gas_date', 'nt_field'])
+    )
+    source_counts = source_daily.groupby('gas_date')['nt_field'].nunique()
+    complete_dates = source_counts[source_counts == len(source_names)].index
+    daily_total = (
+        source_daily[source_daily['gas_date'].isin(complete_dates)]
+        .groupby('gas_date', as_index=False)['supply']
+        .sum()
+        .rename(columns={'supply': 'total_supply'})
+        .sort_values('gas_date')
+    )
+    common_date = daily_total['gas_date'].max() if not daily_total.empty else None
     
     # Calculate field-level averages
     field_metrics = {}
     for field in get_producing_fields():
-        field_data = nt_df[nt_df['nt_field'] == field]
+        field_daily = source_daily[source_daily['nt_field'] == field].copy()
         
-        if not field_data.empty:
-            # Daily aggregation for this field
-            field_daily = field_data.groupby('gas_date')['supply'].sum().reset_index()
-            field_daily = field_daily.sort_values('gas_date')
-            
-            latest_supply = field_current.get(field, 0)
+        if not field_daily.empty:
+            latest_row = field_daily.iloc[-1]
+            latest_supply = latest_row['supply']
+            field_latest_date = latest_row['gas_date']
+            reporting_lag = (latest_date - field_latest_date).days
             
             # 7-day average
             last_7_days = field_daily.tail(7)
@@ -660,6 +676,8 @@ def calculate_nt_metrics(nt_df):
             
             field_metrics[field] = {
                 'current': latest_supply,
+                'latest_date': field_latest_date,
+                'reporting_lag': reporting_lag,
                 'avg_7d': avg_7d,
                 'avg_30d': avg_30d,
                 'trend': trend,
@@ -668,14 +686,20 @@ def calculate_nt_metrics(nt_df):
         else:
             field_metrics[field] = {
                 'current': 0,
+                'latest_date': None,
+                'reporting_lag': None,
                 'avg_7d': 0,
                 'avg_30d': 0,
                 'trend': "stable",
                 'has_data': False
             }
     
-    # Total current production
-    total_current = sum(field_current.values())
+    # Headline totals use only a common gas date across all included sources.
+    total_complete = common_date is not None
+    total_current = (
+        daily_total.loc[daily_total['gas_date'].eq(common_date), 'total_supply'].iloc[0]
+        if total_complete else None
+    )
     
     # Previous day comparison
     if len(daily_total) > 1:
@@ -685,19 +709,36 @@ def calculate_nt_metrics(nt_df):
         change_vs_prev = 0
     
     # 7-day average total
-    if len(daily_total) >= 7:
-        avg_7d_total = daily_total.tail(7)['total_supply'].mean()
-    else:
-        avg_7d_total = daily_total['total_supply'].mean() if len(daily_total) > 0 else 0
+    avg_7d_total = daily_total.tail(7)['total_supply'].mean() if not daily_total.empty else 0
+    avg_30d_total = daily_total.tail(30)['total_supply'].mean() if not daily_total.empty else 0
+
+    qc_rows = []
+    for source_name in source_names:
+        source_data = source_daily[source_daily['nt_field'] == source_name]
+        latest_source = source_data.iloc[-1]
+        qc_rows.append({
+            'Production Source': source_name,
+            'Basin': NT_FIELDS[source_name]['basin'],
+            'Latest AEMO Gas Date': latest_source['gas_date'],
+            'Latest Reported Production (TJ/d)': latest_source['supply'],
+            '7-Day Average (TJ/d)': source_data.tail(7)['supply'].mean(),
+            '30-Day Average (TJ/d)': source_data.tail(30)['supply'].mean(),
+            'Reporting Lag (days)': (latest_date - latest_source['gas_date']).days
+        })
     
     return {
         'latest_date': latest_date,
+        'common_date': common_date,
+        'included_sources': source_names,
         'total_current': total_current,
+        'total_complete': total_complete,
         'change_vs_prev': change_vs_prev,
         'avg_7d_total': avg_7d_total,
+        'avg_30d_total': avg_30d_total,
         'fields': field_metrics,
         'daily_total': daily_total,
-        'daily_by_field': daily_by_field
+        'daily_by_field': source_daily,
+        'qc_table': pd.DataFrame(qc_rows)
     }
 
 def calculate_basin_metrics(nt_df):
@@ -794,6 +835,15 @@ def calculate_basin_metrics(nt_df):
             
             if peak_30d_value > 0:
                 vs_peak_30d = ((avg_30d / peak_30d_value - 1) * 100)
+                logger.info(
+                    "%s Basin vs Peak 30d: current=%.3f TJ/d, peak=%.3f TJ/d, "
+                    "peak period ending=%s, result=%.2f%%",
+                    basin_name,
+                    avg_30d,
+                    peak_30d_value,
+                    peak_30d_date.strftime('%Y-%m-%d'),
+                    vs_peak_30d
+                )
         
         # 6. Supply Stability (coefficient of variation over last 30 days)
         stability = None
@@ -851,8 +901,11 @@ def render_header(metrics):
     st.title("NT Gas Production Monitor")
     
     if metrics['latest_date']:
-        date_str = metrics['latest_date'].strftime("%d %B %Y")
-        st.caption(f"Northern Territory gas production at a glance • Latest data: {date_str}")
+        date_str = metrics['latest_date'].strftime("%d %b %Y")
+        st.caption(
+            "Northern Territory gas production at a glance • "
+            f"Latest AEMO data: {date_str} • Reporting dates vary by facility"
+        )
     else:
         st.caption("Northern Territory gas production at a glance")
 
@@ -863,15 +916,23 @@ def render_headline_kpi(metrics):
     with col1:
         # Prominent primary KPI
         delta_text = None
-        if metrics['avg_7d_total'] > 0:
+        if metrics['total_complete'] and metrics['avg_7d_total'] > 0:
             change_vs_7d = metrics['total_current'] - metrics['avg_7d_total']
             delta_text = f"{change_vs_7d:+.1f} TJ/d vs 7-day avg"
         
         st.metric(
-            label="Total NT Gas Production",
-            value=f"{metrics['total_current']:.1f} TJ/d",
+            label="Reported NT Gas Production",
+            value=(
+                f"{metrics['total_current']:.1f} TJ/d"
+                if metrics['total_complete']
+                else "Incomplete latest-day reporting"
+            ),
             delta=delta_text
         )
+        if metrics['common_date'] is not None:
+            st.caption(f"Gas date: {metrics['common_date'].strftime('%d %b %Y')}")
+        else:
+            st.caption("No common gas date available across included sources")
     
     with col2:
         st.metric(
@@ -889,7 +950,7 @@ def render_headline_kpi(metrics):
 def render_field_cards(metrics, nt_df):
     """Render compact professional field production cards"""
     st.markdown("---")
-    st.subheader("Field Production")
+    st.subheader("Production by Field / Facility")
     
     producing_fields = get_producing_fields()
     cols = st.columns(len(producing_fields))
@@ -903,11 +964,18 @@ def render_field_cards(metrics, nt_df):
                 # Calculate trend indicator
                 trend = field_metrics['trend']
                 if trend == 'up':
-                    trend_html = '<span class="trend-pill trend-up">↑ Rising</span>'
+                    trend_html = '<span class="trend-pill trend-up">↑ Production Rising</span>'
                 elif trend == 'down':
-                    trend_html = '<span class="trend-pill trend-down">↓ Falling</span>'
+                    trend_html = '<span class="trend-pill trend-down">↓ Production Falling</span>'
                 else:
-                    trend_html = '<span class="trend-pill trend-stable">→ Stable</span>'
+                    trend_html = '<span class="trend-pill trend-stable">→ Production Stable</span>'
+
+                data_to = field_metrics['latest_date'].strftime('%d %b %Y')
+                lag = field_metrics['reporting_lag']
+                lag_html = (
+                    f'<br>Reporting lag: {lag} days'
+                    if lag > 2 else ''
+                )
                 
                 card_html = f"""
                 <div class="field-card">
@@ -915,6 +983,7 @@ def render_field_cards(metrics, nt_df):
                     <div class="field-card-meta">{field_config['basin']} Basin</div>
                     <div class="field-card-value">{field_metrics['current']:.1f} <span style="font-size: 0.6em; color: #666;">TJ/d</span></div>
                     <div class="field-card-avg">7-day: {field_metrics['avg_7d']:.1f} TJ/d • 30-day: {field_metrics['avg_30d']:.1f} TJ/d</div>
+                    <div class="field-card-meta">Data to: {data_to}{lag_html}</div>
                 </div>
                 """
                 st.markdown(card_html, unsafe_allow_html=True)
@@ -928,6 +997,56 @@ def render_field_cards(metrics, nt_df):
                 </div>
                 """
                 st.markdown(card_html, unsafe_allow_html=True)
+
+def render_data_freshness(metrics):
+    """Render source-level reporting dates and numerical reconciliation details."""
+    with st.expander("Data Freshness"):
+        if metrics['qc_table'].empty:
+            st.info("No production source data available")
+            return
+
+        freshness = metrics['qc_table'][[
+            'Production Source', 'Basin', 'Latest AEMO Gas Date',
+            'Reporting Lag (days)'
+        ]].copy()
+        freshness['Latest AEMO Gas Date'] = freshness['Latest AEMO Gas Date'].dt.strftime('%d %b %Y')
+        freshness['Reporting Lag'] = freshness['Reporting Lag (days)'].apply(
+            lambda lag: 'Current' if lag == 0 else f'{lag} days'
+        )
+        st.dataframe(
+            freshness[['Production Source', 'Basin', 'Latest AEMO Gas Date', 'Reporting Lag']],
+            hide_index=True,
+            use_container_width=True
+        )
+
+        st.markdown("**Production source QC**")
+        qc_display = metrics['qc_table'].copy()
+        qc_display['Latest AEMO Gas Date'] = qc_display['Latest AEMO Gas Date'].dt.strftime('%d %b %Y')
+        st.dataframe(qc_display, hide_index=True, use_container_width=True)
+
+        if metrics['total_complete']:
+            common_rows = metrics['daily_by_field'][
+                metrics['daily_by_field']['gas_date'].eq(metrics['common_date'])
+            ]
+            source_values = common_rows.set_index('nt_field')['supply']
+            summed_total = source_values.sum()
+            displayed_difference = metrics['total_current'] - metrics['avg_7d_total']
+            st.caption(
+                f"Latest AEMO gas date: {metrics['latest_date'].strftime('%d %b %Y')} | "
+                f"Common gas date: {metrics['common_date'].strftime('%d %b %Y')}"
+            )
+            st.caption(
+                f"Source values on common date: "
+                f"{', '.join(f'{name} {source_values.get(name, 0):.1f} TJ/d' for name in metrics['included_sources'])}"
+            )
+            st.caption(
+                f"Summed NT total: {summed_total:.1f} TJ/d | Displayed NT total: "
+                f"{metrics['total_current']:.1f} TJ/d | 7-day NT average: "
+                f"{metrics['avg_7d_total']:.1f} TJ/d | Difference vs 7-day average: "
+                f"{displayed_difference:+.1f} TJ/d"
+            )
+        else:
+            st.warning("No common gas date is available; a mixed-date NT total is not displayed.")
     
 
 def render_nt_history_chart(metrics):
@@ -1073,7 +1192,7 @@ def render_basin_composition(metrics):
                 producing = [f for f in basin_config['fields'] 
                             if metrics['fields'].get(f, {}).get('has_data', False)]
                 if producing:
-                    st.caption(f"Fields: {', '.join(producing)}")
+                    st.caption(f"Sources: {', '.join(producing)}")
                 else:
                     st.caption("No active production")
     else:
@@ -1189,8 +1308,12 @@ def render_basin_performance(basin_metrics):
         st.markdown("""
         **Basin Performance Metrics - Calculation Methods**
         
-        All calculations are based exclusively on actual AEMO Gas Bulletin Board production data. 
-        No values are fabricated for facilities that have not begun reporting.
+        All production calculations are based exclusively on publicly available AEMO Gas Bulletin Board data. 
+        No production values are estimated or fabricated where data has not been reported. Reporting dates may vary between facilities, and derived metrics are calculated using the available reported data.
+
+        **Reporting dates**
+
+        AEMO reporting availability can vary by facility. “Current” on an individual field/facility card represents that source’s latest reported production value and may therefore relate to a different gas date from another source. NT-wide totals are calculated using a common gas date and do not combine production values from different reporting dates.
         
         **Current**: Latest reported daily basin production (TJ/d) from the most recent gas date.
         
@@ -1209,15 +1332,16 @@ def render_basin_performance(basin_metrics):
         `(current 30d avg / historical peak 30d avg - 1) × 100`  
         Typically 0% or negative. Peak uses 30-day rolling average, not single highest day.
         
-        **Supply Stability**: Measures consistency of reported daily production over 30 days using coefficient of variation (CV):  
+        **Production status**: Card status compares the latest source value with its trailing 7-day average. 
+        “Production Rising” is more than 5% above that average, “Production Falling” is more than 5% below it, and “Production Stable” is within ±5% (when the 7-day average is positive).
+
+        **Supply Stability**: Measures consistency of reported daily production over 30 days using coefficient of variation (CV):
         `CV = (standard deviation / mean) × 100`  
         - **High** = CV < 5%
         - **Moderate** = CV 5-15%  
         - **Variable** = CV > 15%
-        
-        ⚠️ **Important**: Supply Stability describes variability in reported AEMO production data only. 
-        It does NOT measure facility reliability, plant availability, or reservoir performance.
-        Production can vary due to market conditions, maintenance schedules, or operational decisions.
+
+        **Important**: Supply Stability describes variability in reported AEMO production data only. It does not measure facility reliability, plant availability or reservoir performance. Reported production may vary due to market conditions, maintenance, operational decisions, reporting availability or other factors.
         
         **Status Indicators**:
         - **Awaiting production data**: No AEMO GBB data available for this basin yet
@@ -1465,6 +1589,7 @@ def main():
     render_headline_kpi(metrics)
     render_nt_history_chart(metrics)  # Moved up - dominant visual
     render_field_cards(metrics, nt_df)
+    render_data_freshness(metrics)
     render_basin_composition(metrics)
     render_basin_performance(basin_metrics)  # New basin performance section
     render_field_analysis(metrics, nt_df)  # Optional deeper analysis at bottom
@@ -1477,23 +1602,24 @@ def main():
     
     # Data attribution
     st.markdown(
-        "**Data Attribution:** Gas production data sourced from the "
+        "**Data Attribution:** Gas production data is sourced from the "
         "[AEMO Gas Bulletin Board](https://www.aemo.com.au/energy-systems/gas/gas-bulletin-board-gbb) "
-        "via [nemweb.com.au](https://nemweb.com.au/Reports/Current/GBB/)"
+        "via [NEMWeb](https://nemweb.com.au/Reports/Current/GBB/). "
+        "Field/basin classifications, aggregation and derived performance metrics are calculated by this dashboard."
     )
     
     # Dashboard information
-    latest_date_str = metrics['latest_date'].strftime("%d %B %Y") if metrics['latest_date'] else "unavailable"
     st.markdown(
-        f"**Dashboard Information:** This is an independent public dashboard displaying Northern Territory "
-        f"gas production data. Latest data: {latest_date_str}. "
-        f"The dashboard updates as AEMO publishes new Gas Bulletin Board reports."
+        "**Dashboard Information:** This is an independently developed public dashboard using publicly available data. "
+        "Reporting dates may vary by facility and the latest available AEMO gas date does not necessarily represent "
+        "the latest reported production date for every facility."
     )
     
     # Disclaimer
     st.caption(
-        "Not affiliated with AEMO, gas producers, or government agencies. "
-        "For official market information, consult [aemo.com.au](https://www.aemo.com.au)"
+        "**Disclaimer:** This dashboard is provided for general informational purposes only. "
+        "It is not affiliated with or endorsed by AEMO, any gas producer, my employer or any government agency. "
+        "For official market information, refer to [AEMO](https://www.aemo.com.au)."
     )
 
 if __name__ == "__main__":
