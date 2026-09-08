@@ -389,7 +389,7 @@ def get_database_connection():
 # Data Fetching and Processing
 # ============================================================================
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=900)
 def fetch_aemo_data():
     """
     Fetch and parse AEMO Gas Bulletin Board data.
@@ -1414,11 +1414,11 @@ def main():
             should_fetch = True
             fetch_reason = "No data in database"
         else:
-            # Check if data is stale (older than 24 hours)
+            # Refresh several times per day so newly published AEMO gas days appear promptly.
             latest_import = session.query(func.max(GBBRecord.imported_date)).scalar()
             if latest_import:
                 hours_since_import = (datetime.now() - latest_import).total_seconds() / 3600
-                if hours_since_import > 24:
+                if hours_since_import > 6:
                     should_fetch = True
                     fetch_reason = f"Data is {hours_since_import:.1f} hours old"
         
@@ -1428,6 +1428,7 @@ def main():
         if should_fetch:
             with st.spinner(f"Loading AEMO data... ({fetch_reason})"):
                 st.caption("Downloading and filtering NT AEMO records...")
+                fetch_aemo_data.clear()
                 raw_df = fetch_aemo_data()
                 
                 if raw_df is not None:
