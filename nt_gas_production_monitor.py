@@ -17,6 +17,7 @@ import requests
 import zipfile
 import io
 import logging
+import hmac
 from io import StringIO
 from datetime import datetime, timedelta
 # Database imports
@@ -1921,12 +1922,55 @@ def render_admin_section(engine, session_maker):
             st.error(f"Database query failed: {str(e)}")
 
 # ============================================================================
+# Authentication
+# ============================================================================
+
+def check_password():
+    """Returns True if the user is authenticated, False otherwise."""
+    if st.session_state.get("authenticated", False):
+        return True
+
+    # Read password from Streamlit secrets securely without hard-coding
+    app_password = None
+    try:
+        if "APP_PASSWORD" in st.secrets:
+            app_password = str(st.secrets["APP_PASSWORD"])
+    except Exception:
+        app_password = None
+
+    if not app_password:
+        st.title("NT Gas Production Monitor")
+        st.caption("Prototype - restricted access")
+        st.error("⚠️ Application authentication is not configured. Please set `APP_PASSWORD` in Streamlit Secrets.")
+        return False
+
+    st.title("NT Gas Production Monitor")
+    st.caption("Prototype - restricted access")
+
+    with st.form("login_form"):
+        password_input = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Enter")
+
+        if submitted:
+            if hmac.compare_digest(password_input, app_password):
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Incorrect password")
+
+    return False
+
+# ============================================================================
 # Main Application
 # ============================================================================
 
 def main():
     """Main application entry point"""
     
+    # Check authentication before running any database or data loading logic
+    if not check_password():
+        return
+
     # Initialize database
     loading_placeholder = st.empty()
     loading_placeholder.info("Connecting to the production database...")
