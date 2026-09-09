@@ -394,49 +394,103 @@ def get_database_connection():
 @st.cache_data(ttl=900)
 def fetch_aemo_data():
     """
-    Fetch and parse AEMO Gas Bulletin Board data.
-    Reuses existing proven download logic.
+    Fetch and merge AEMO historical and recent Actual Flow data.
+
+    The Last31 dataset has priority for duplicate (GasDate, FacilityId)
+    records because it can contain more recent AEMO revisions.
     """
-    url = "https://nemweb.com.au/Reports/Current/GBB/GasBBActualFlowStorage.zip"
-    
+    historical_url = "https://nemweb.com.au/Reports/Current/GBB/GasBBActualFlowStorage.zip"
+    recent_url = "https://nemweb.com.au/Reports/Current/GBB/GasBBActualFlowStorageLast31.CSV"
+
+    def filter_nt_production(frame):
+        if frame is None or frame.empty:
+            return pd.DataFrame()
+        frame = frame[
+            frame['State'].eq('NT') & frame['FacilityType'].eq('PROD')
+        ].copy()
+        frame['GasDate'] = pd.to_datetime(frame['GasDate'], errors='coerce')
+        if 'LastUpdated' in frame.columns:
+            frame['LastUpdated'] = pd.to_datetime(frame['LastUpdated'], errors='coerce')
+        else:
+            frame['LastUpdated'] = pd.NaT
+        return frame.dropna(subset=['GasDate', 'FacilityId'])
+
+    historical = None
+    recent = None
+
     try:
-        response = requests.get(url, timeout=60, stream=True)
+        response = requests.get(historical_url, timeout=60, stream=True)
         response.raise_for_status()
-        
-        downloaded_data = b''
-        for chunk in response.iter_content(chunk_size=8192):
-            if chunk:
-                downloaded_data += chunk
-        
+        downloaded_data = b''.join(
+            chunk for chunk in response.iter_content(chunk_size=8192) if chunk
+        )
         with zipfile.ZipFile(io.BytesIO(downloaded_data)) as zip_file:
-            csv_files = [f for f in zip_file.namelist() if f.lower().endswith('.csv')]
+            csv_files = [name for name in zip_file.namelist() if name.lower().endswith('.csv')]
             if not csv_files:
-                st.error("No CSV files found in AEMO archive")
-                return None
-            
+                raise ValueError("No CSV files found in historical AEMO archive")
             with zip_file.open(csv_files[0]) as csv_file:
-                nt_chunks = []
-                for chunk in pd.read_csv(csv_file, chunksize=50000):
-                    nt_chunk = chunk[
-                        chunk['State'].eq('NT') &
-                        chunk['FacilityType'].eq('PROD')
-                    ].copy()
-                    if not nt_chunk.empty:
-                        nt_chunks.append(nt_chunk)
+                chunks = [
+                    filter_nt_production(chunk)
+                    for chunk in pd.read_csv(csv_file, chunksize=50000)
+                ]
+            historical = pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
+            logger.info(
+                "AEMO historical ZIP latest NT gas date: %s",
+                historical['GasDate'].max() if not historical.empty else None
+            )
+    except Exception as exc:
+        st.warning(f"Historical AEMO Actual Flow archive unavailable: {exc}")
+        logger.warning("Historical AEMO download failed: %s", exc)
 
-                if not nt_chunks:
-                    return None
+    try:
+        response = requests.get(recent_url, timeout=60)
+        response.raise_for_status()
+        recent = filter_nt_production(pd.read_csv(io.StringIO(response.text)))
+        logger.info(
+            "AEMO Last31 latest NT gas date: %s",
+            recent['GasDate'].max() if not recent.empty else None
+        )
+    except Exception as exc:
+        st.warning(f"AEMO Last31 Actual Flow data unavailable; using historical data: {exc}")
+        logger.warning("AEMO Last31 download failed: %s", exc)
 
-                df = pd.concat(nt_chunks, ignore_index=True)
-                df['GasDate'] = pd.to_datetime(df['GasDate'])
-                if 'LastUpdated' in df.columns:
-                    df['LastUpdated'] = pd.to_datetime(df['LastUpdated'])
-
-                return df
-                
-    except Exception as e:
-        st.error(f"Failed to fetch AEMO data: {str(e)}")
+    available = [
+        frame.assign(_source_priority=priority, _source_name=source_name)
+        for frame, priority, source_name in (
+            (historical, 0, 'historical ZIP'),
+            (recent, 1, 'Last31 CSV')
+        )
+        if frame is not None and not frame.empty
+    ]
+    if not available:
+        st.error("Failed to fetch both AEMO Actual Flow datasets")
         return None
+
+    combined = pd.concat(available, ignore_index=True)
+    duplicate_mask = combined.duplicated(subset=['GasDate', 'FacilityId'], keep=False)
+    duplicate_sources = combined.loc[duplicate_mask, '_source_name'].value_counts().to_dict()
+    combined = combined.sort_values(
+        ['GasDate', 'FacilityId', '_source_priority', 'LastUpdated'],
+        na_position='first'
+    )
+    replacements = int(duplicate_mask.sum() / 2) if duplicate_mask.any() else 0
+    combined = combined.drop_duplicates(
+        subset=['GasDate', 'FacilityId'], keep='last'
+    )
+    merged_latest = combined['GasDate'].max()
+    logger.info(
+        "AEMO merged latest NT gas date: %s; duplicate groups resolved: %d; "
+        "duplicate source rows: %s",
+        merged_latest,
+        replacements,
+        duplicate_sources
+    )
+    logger.info(
+        "AEMO merged latest gas date by tracked facility: %s",
+        combined[combined['FacilityName'].isin(['Mereenie', 'Palm Valley', 'Yelcherr', 'SPCF'])]
+        .groupby('FacilityName')['GasDate'].max().to_dict()
+    )
+    return combined.drop(columns=['_source_priority', '_source_name'])
 
 def normalize_aemo_data(df):
     """
@@ -1090,6 +1144,10 @@ def render_field_cards(metrics, nt_df):
 def render_data_freshness(metrics, nt_df):
     """Render source-level reporting dates and numerical reconciliation details."""
     with st.expander("Data Freshness"):
+        st.caption(
+            "Recent observations are sourced from AEMO's Last31 Actual Flow dataset; "
+            "historical observations are sourced from the full Actual Flow archive."
+        )
         if metrics['qc_table'].empty:
             st.info("No production source data available")
             return
@@ -1574,6 +1632,10 @@ def render_admin_section(engine, session_maker):
     """Render collapsed admin/diagnostics section"""
     with st.expander("Admin & Diagnostics"):
         st.markdown("### Data Refresh")
+        st.caption(
+            "Refresh combines AEMO's full Actual Flow archive with the recent Last31 "
+            "Actual Flow dataset. Last31 takes precedence for duplicate gas-date/facility records."
+        )
         
         col1, col2 = st.columns([2, 1])
         
@@ -1774,8 +1836,8 @@ def main():
     
     # Disclaimer
     st.caption(
-        "**Disclaimer:** This independent dashboard uses publicly available AEMO data. "
-        "It is not affiliated with or endorsed by AEMO, any gas producer or government agency. "
+        "**Disclaimer:** This dashboard is provided for general informational purposes only. "
+        "It is not affiliated with or endorsed by AEMO, any gas producer, my employer or any government agency. "
         "For official market information, refer to [AEMO](https://www.aemo.com.au)."
     )
 
