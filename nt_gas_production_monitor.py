@@ -358,13 +358,13 @@ class GBBRecord(Base):
         UniqueConstraint('gas_date', 'facility_id', name='uix_gas_date_facility'),
     )
 
+@st.cache_resource
 def get_database_connection():
     """Get database connection using DATABASE_URL environment variable"""
     try:
         database_url = os.environ.get('DATABASE_URL')
         if not database_url:
-            st.error("⚠️ DATABASE_URL environment variable not configured")
-            st.stop()
+            raise RuntimeError("DATABASE_URL environment variable not configured")
         
         engine_options = {}
         if database_url.startswith("sqlite"):
@@ -385,8 +385,7 @@ def get_database_connection():
         Session = sessionmaker(bind=engine)
         return engine, Session
     except Exception as e:
-        st.error(f"Database connection failed: {str(e)}")
-        st.stop()
+        raise RuntimeError(f"Database connection failed: {str(e)}") from e
 
 # ============================================================================
 # Data Fetching and Processing
@@ -615,8 +614,9 @@ def calculate_nt_metrics(nt_df):
             'total_current': 0,
             'total_complete': False,
             'change_vs_prev': 0,
-            'avg_7d_total': 0,
-            'avg_30d_total': 0,
+            'avg_7d_total': None,
+            'avg_30d_total': None,
+            'complete_days': pd.DataFrame(),
             'fields': {},
             'daily_total': pd.DataFrame(),
             'daily_by_field': pd.DataFrame(),
@@ -709,8 +709,15 @@ def calculate_nt_metrics(nt_df):
         change_vs_prev = 0
     
     # 7-day average total
-    avg_7d_total = daily_total.tail(7)['total_supply'].mean() if not daily_total.empty else 0
-    avg_30d_total = daily_total.tail(30)['total_supply'].mean() if not daily_total.empty else 0
+    complete_days = daily_total.tail(7).copy()
+    avg_7d_total = (
+        complete_days['total_supply'].mean()
+        if len(complete_days) == 7 else None
+    )
+    avg_30d_total = (
+        daily_total.tail(30)['total_supply'].mean()
+        if len(daily_total) >= 30 else None
+    )
 
     qc_rows = []
     for source_name in source_names:
@@ -735,13 +742,48 @@ def calculate_nt_metrics(nt_df):
         'change_vs_prev': change_vs_prev,
         'avg_7d_total': avg_7d_total,
         'avg_30d_total': avg_30d_total,
+        'complete_days': complete_days,
         'fields': field_metrics,
         'daily_total': daily_total,
         'daily_by_field': source_daily,
         'qc_table': pd.DataFrame(qc_rows)
     }
 
-def calculate_basin_metrics(nt_df):
+def validate_nt_metrics(metrics):
+    """Check headline invariants before rendering public KPI values."""
+    errors = []
+    if metrics['common_date'] is None:
+        errors.append('No common headline gas date exists')
+    else:
+        common_rows = metrics['daily_by_field'][
+            metrics['daily_by_field']['gas_date'].eq(metrics['common_date'])
+        ]
+        if set(common_rows['nt_field']) != set(metrics['included_sources']):
+            errors.append('Common headline date does not contain every required source')
+        if common_rows['supply'].isna().any():
+            errors.append('A missing source value entered the headline total')
+        if abs(common_rows['supply'].sum() - metrics['total_current']) > 1e-9:
+            errors.append('Displayed NT total does not equal same-date source sum')
+
+    if metrics['avg_7d_total'] is not None:
+        complete_days = metrics['complete_days']
+        if len(complete_days) != 7:
+            errors.append('7-day average does not contain exactly seven complete days')
+        if len(complete_days) and complete_days['total_supply'].isna().any():
+            errors.append('A missing value entered the 7-day average')
+        for gas_date in complete_days['gas_date']:
+            day_sources = set(
+                metrics['daily_by_field'].loc[
+                    metrics['daily_by_field']['gas_date'].eq(gas_date),
+                    'nt_field'
+                ]
+            )
+            if day_sources != set(metrics['included_sources']):
+                errors.append(f'7-day average date {gas_date.date()} is missing a required source')
+
+    return errors
+
+def calculate_basin_metrics(nt_df, common_date=None):
     """
     Calculate basin-level performance metrics from NT facility data.
     Returns dict with basin-level current, averages, trends, and stability metrics.
@@ -765,12 +807,15 @@ def calculate_basin_metrics(nt_df):
     daily_basin = basin_df.groupby(['gas_date', 'basin'])['supply'].sum().reset_index()
     daily_basin = daily_basin.sort_values('gas_date')
     
-    # Facilities can publish on different schedules, so use each basin's latest available day.
+    # Basin point-in-time metrics use the common NT date when one exists.
     basin_latest_dates = daily_basin.groupby('basin')['gas_date'].max().to_dict()
+    comparison_date = common_date if common_date is not None else None
     basin_current_values = {
         basin_name: daily_basin.loc[
             daily_basin['basin'].eq(basin_name)
-            & daily_basin['gas_date'].eq(basin_latest_dates[basin_name]),
+            & daily_basin['gas_date'].eq(
+                comparison_date if comparison_date is not None else basin_latest_dates[basin_name]
+            ),
             'supply'
         ].sum()
         for basin_name in basin_latest_dates
@@ -797,17 +842,17 @@ def calculate_basin_metrics(nt_df):
             }
             continue
         
-        # 1. Current production
-        latest_date = basin_latest_dates[basin_name]
+        # 1. Current production. Use the common NT date so basin comparisons align.
+        latest_date = common_date if common_date is not None else basin_latest_dates[basin_name]
         current_data = basin_data[basin_data['gas_date'] == latest_date]
-        current = current_data['supply'].iloc[0] if not current_data.empty else 0
+        current = current_data['supply'].iloc[0] if not current_data.empty else None
         
         # 2. 30-day average
         last_30_days = basin_data.tail(30)
         avg_30d = last_30_days['supply'].mean() if len(last_30_days) > 0 else 0
         
         # 3. NT Share
-        nt_share = (current / total_nt_current * 100) if total_nt_current > 0 else 0
+        nt_share = (current / total_nt_current * 100) if current is not None and total_nt_current > 0 else None
         
         # 4. 90-day change (30d avg now vs 30d avg 90 days ago)
         change_90d = None
@@ -916,7 +961,11 @@ def render_headline_kpi(metrics):
     with col1:
         # Prominent primary KPI
         delta_text = None
-        if metrics['total_complete'] and metrics['avg_7d_total'] > 0:
+        if (
+            metrics['total_complete']
+            and metrics['avg_7d_total'] is not None
+            and metrics['avg_7d_total'] > 0
+        ):
             change_vs_7d = metrics['total_current'] - metrics['avg_7d_total']
             delta_text = f"{change_vs_7d:+.1f} TJ/d vs 7-day avg"
         
@@ -937,15 +986,17 @@ def render_headline_kpi(metrics):
     with col2:
         st.metric(
             label="7-Day Average",
-            value=f"{metrics['avg_7d_total']:.1f} TJ/d"
+            value=(
+                f"{metrics['avg_7d_total']:.1f} TJ/d"
+                if metrics['avg_7d_total'] is not None else "N/A"
+            )
         )
+        if metrics['avg_7d_total'] is None:
+            st.caption("7-day comparison unavailable - incomplete aligned reporting")
     
     with col3:
         producing_count = len([f for f, m in metrics['fields'].items() if m['has_data']])
-        st.metric(
-            label="Active Fields",
-            value=str(producing_count)
-        )
+        st.metric(label="Tracked Sources", value=str(producing_count))
 
 def render_field_cards(metrics, nt_df):
     """Render compact professional field production cards"""
@@ -983,6 +1034,7 @@ def render_field_cards(metrics, nt_df):
                     <div class="field-card-meta">{field_config['basin']} Basin</div>
                     <div class="field-card-value">{field_metrics['current']:.1f} <span style="font-size: 0.6em; color: #666;">TJ/d</span></div>
                     <div class="field-card-avg">7-day: {field_metrics['avg_7d']:.1f} TJ/d • 30-day: {field_metrics['avg_30d']:.1f} TJ/d</div>
+                    <div class="field-card-meta">Facility-specific reporting windows</div>
                     <div class="field-card-meta">Data to: {data_to}{lag_html}</div>
                 </div>
                 """
@@ -998,7 +1050,7 @@ def render_field_cards(metrics, nt_df):
                 """
                 st.markdown(card_html, unsafe_allow_html=True)
 
-def render_data_freshness(metrics):
+def render_data_freshness(metrics, nt_df):
     """Render source-level reporting dates and numerical reconciliation details."""
     with st.expander("Data Freshness"):
         if metrics['qc_table'].empty:
@@ -1024,13 +1076,28 @@ def render_data_freshness(metrics):
         qc_display['Latest AEMO Gas Date'] = qc_display['Latest AEMO Gas Date'].dt.strftime('%d %b %Y')
         st.dataframe(qc_display, hide_index=True, use_container_width=True)
 
+        st.markdown("**Data lineage diagnostics**")
+        lineage_rows = []
+        for source_name in metrics['included_sources']:
+            source_df = nt_df[nt_df['nt_field'].eq(source_name)]
+            latest_row = source_df.sort_values('gas_date').iloc[-1]
+            lineage_rows.append({
+                'Dashboard Name': source_name,
+                'Raw AEMO Facility Name': ', '.join(sorted(source_df['facility_name'].dropna().unique())),
+                'Database Table/Source': 'gbb_records (mapped NT PROD)',
+                'State': latest_row['state'],
+                'Latest Date': latest_row['gas_date'].strftime('%d %b %Y'),
+                'Latest Value': latest_row['supply'],
+                'Record Count': len(source_df)
+            })
+        st.dataframe(pd.DataFrame(lineage_rows), hide_index=True, use_container_width=True)
+
         if metrics['total_complete']:
             common_rows = metrics['daily_by_field'][
                 metrics['daily_by_field']['gas_date'].eq(metrics['common_date'])
             ]
             source_values = common_rows.set_index('nt_field')['supply']
             summed_total = source_values.sum()
-            displayed_difference = metrics['total_current'] - metrics['avg_7d_total']
             st.caption(
                 f"Latest AEMO gas date: {metrics['latest_date'].strftime('%d %b %Y')} | "
                 f"Common gas date: {metrics['common_date'].strftime('%d %b %Y')}"
@@ -1039,12 +1106,25 @@ def render_data_freshness(metrics):
                 f"Source values on common date: "
                 f"{', '.join(f'{name} {source_values.get(name, 0):.1f} TJ/d' for name in metrics['included_sources'])}"
             )
-            st.caption(
-                f"Summed NT total: {summed_total:.1f} TJ/d | Displayed NT total: "
-                f"{metrics['total_current']:.1f} TJ/d | 7-day NT average: "
-                f"{metrics['avg_7d_total']:.1f} TJ/d | Difference vs 7-day average: "
-                f"{displayed_difference:+.1f} TJ/d"
-            )
+            if metrics['avg_7d_total'] is not None:
+                displayed_difference = metrics['total_current'] - metrics['avg_7d_total']
+                st.caption(
+                    f"Summed NT total: {summed_total:.1f} TJ/d | Displayed NT total: "
+                    f"{metrics['total_current']:.1f} TJ/d | 7-day NT average: "
+                    f"{metrics['avg_7d_total']:.1f} TJ/d | Difference vs 7-day average: "
+                    f"{displayed_difference:+.1f} TJ/d"
+                )
+                st.caption("Seven complete NT days used for the displayed 7-day average:")
+                st.dataframe(
+                    metrics['complete_days'].rename(columns={
+                        'gas_date': 'Gas date',
+                        'total_supply': 'NT total (TJ/d)'
+                    }),
+                    hide_index=True,
+                    use_container_width=True
+                )
+            else:
+                st.caption("7-day NT average: N/A - insufficient aligned reporting")
         else:
             st.warning("No common gas date is available; a mixed-date NT total is not displayed.")
     
@@ -1149,12 +1229,16 @@ def render_basin_composition(metrics):
         'Beetaloo': '#95a5a6'
     }
     
+    common_rows = metrics['daily_by_field']
+    if metrics['common_date'] is not None:
+        common_rows = common_rows[common_rows['gas_date'].eq(metrics['common_date'])]
+    common_values = (
+        common_rows.set_index('nt_field')['supply']
+        if not common_rows.empty else pd.Series(dtype=float)
+    )
+
     for basin_name, basin_config in BASINS.items():
-        total = sum(
-            metrics['fields'].get(field, {}).get('current', 0)
-            for field in basin_config['fields']
-            if metrics['fields'].get(field, {}).get('has_data', False)
-        )
+        total = sum(common_values.get(field, 0) for field in basin_config['fields'])
         basin_totals[basin_name] = total
     
     total_all = sum(basin_totals.values())
@@ -1233,7 +1317,7 @@ def render_basin_performance(basin_metrics):
         
         if metrics['status'] == 'establishing':
             st.caption("📊 Establishing baseline (fewer than 7 days of data)")
-            if metrics['current'] > 0:
+            if metrics['current'] is not None and metrics['current'] > 0:
                 st.caption(f"Current production: {metrics['current']:.1f} TJ/d")
             continue
         
@@ -1241,13 +1325,21 @@ def render_basin_performance(basin_metrics):
         cols = st.columns([1.2, 1.2, 0.9, 1.3, 1.3, 1.4])
         
         with cols[0]:
-            st.metric("Current", f"{metrics['current']:.1f} TJ/d")
+            st.metric(
+                "Current",
+                f"{metrics['current']:.1f} TJ/d"
+                if metrics['current'] is not None else "N/A"
+            )
         
         with cols[1]:
             st.metric("30d Avg", f"{metrics['avg_30d']:.1f} TJ/d")
         
         with cols[2]:
-            st.metric("NT Share", f"{metrics['nt_share']:.1f}%")
+            st.metric(
+                "NT Share",
+                f"{metrics['nt_share']:.1f}%"
+                if metrics['nt_share'] is not None else "N/A"
+            )
         
         with cols[3]:
             # 90d Change
@@ -1308,12 +1400,11 @@ def render_basin_performance(basin_metrics):
         st.markdown("""
         **Basin Performance Metrics - Calculation Methods**
         
-        All production calculations are based exclusively on publicly available AEMO Gas Bulletin Board data. 
-        No production values are estimated or fabricated where data has not been reported. Reporting dates may vary between facilities, and derived metrics are calculated using the available reported data.
+        All production calculations are based exclusively on publicly available AEMO Gas Bulletin Board data. No production values are estimated or fabricated where data has not been reported.
 
         **Reporting dates**
 
-        AEMO reporting availability can vary by facility. “Current” on an individual field/facility card represents that source’s latest reported production value and may therefore relate to a different gas date from another source. NT-wide totals are calculated using a common gas date and do not combine production values from different reporting dates.
+        AEMO reporting availability may vary by facility. Current values on individual field/facility cards represent the latest reported value for that source and may therefore relate to different gas dates. NT-wide totals, shares and rolling averages use aligned common reporting dates and do not combine production from different gas dates. Missing production reports are not treated as zero.
         
         **Current**: Latest reported daily basin production (TJ/d) from the most recent gas date.
         
@@ -1521,8 +1612,14 @@ def main():
     """Main application entry point"""
     
     # Initialize database
-    st.info("Connecting to the production database...")
-    engine, Session = get_database_connection()
+    loading_placeholder = st.empty()
+    loading_placeholder.info("Connecting to the production database...")
+    try:
+        engine, Session = get_database_connection()
+    except Exception as exc:
+        loading_placeholder.empty()
+        st.error(f"Database connection failed: {exc}")
+        st.stop()
     database_url = os.environ.get('DATABASE_URL')
     
     # Auto-fetch AEMO data on first load or if data is stale
@@ -1538,13 +1635,9 @@ def main():
             should_fetch = True
             fetch_reason = "No data in database"
         else:
-            # Refresh several times per day so newly published AEMO gas days appear promptly.
-            latest_import = session.query(func.max(GBBRecord.imported_date)).scalar()
-            if latest_import:
-                hours_since_import = (datetime.now() - latest_import).total_seconds() / 3600
-                if hours_since_import > 6:
-                    should_fetch = True
-                    fetch_reason = f"Data is {hours_since_import:.1f} hours old"
+            # Existing data is read from the database on normal Streamlit reruns.
+            # New AEMO files are fetched through the explicit refresh control.
+            should_fetch = False
         
         session.close()
         
@@ -1575,21 +1668,35 @@ def main():
     except Exception as e:
         st.warning(f"⚠️ Auto-fetch check failed: {str(e)}")
     
-    # Get cached NT data; chart interactions do not re-query the database
-    nt_df = get_cached_nt_data(database_url)
+    # Get cached NT data; chart interactions do not re-query the database.
+    try:
+        nt_df = get_cached_nt_data(database_url)
+    except Exception as exc:
+        loading_placeholder.empty()
+        st.error(f"Unable to load cached production data: {exc}")
+        st.stop()
+    finally:
+        loading_placeholder.empty()
     
     # Calculate metrics
     metrics = calculate_nt_metrics(nt_df)
     
     # Calculate basin-level performance metrics
-    basin_metrics = calculate_basin_metrics(nt_df)
+    basin_metrics = calculate_basin_metrics(nt_df, metrics['common_date'])
+
+    qc_errors = validate_nt_metrics(metrics)
+    if qc_errors:
+        st.error("Headline QC failed: " + "; ".join(qc_errors))
+        metrics['total_complete'] = False
+        metrics['total_current'] = None
+        metrics['avg_7d_total'] = None
     
     # Render dashboard - prioritized visual hierarchy
     render_header(metrics)
     render_headline_kpi(metrics)
     render_nt_history_chart(metrics)  # Moved up - dominant visual
     render_field_cards(metrics, nt_df)
-    render_data_freshness(metrics)
+    render_data_freshness(metrics, nt_df)
     render_basin_composition(metrics)
     render_basin_performance(basin_metrics)  # New basin performance section
     render_field_analysis(metrics, nt_df)  # Optional deeper analysis at bottom
