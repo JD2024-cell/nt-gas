@@ -1774,8 +1774,8 @@ def main():
     
     # Disclaimer
     st.caption(
-        "**Disclaimer:** This dashboard is provided for general informational purposes only. "
-        "It is not affiliated with or endorsed by AEMO, any gas producer, my employer or any government agency. "
+        "**Disclaimer:** This independent dashboard uses publicly available AEMO data. "
+        "It is not affiliated with or endorsed by AEMO, any gas producer or government agency. "
         "For official market information, refer to [AEMO](https://www.aemo.com.au)."
     )
 
