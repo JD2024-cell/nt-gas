@@ -445,7 +445,19 @@ def fetch_aemo_data():
     try:
         response = requests.get(recent_url, timeout=60)
         response.raise_for_status()
-        recent = filter_nt_production(pd.read_csv(io.StringIO(response.text)))
+        recent_raw = pd.read_csv(io.StringIO(response.text))
+        recent_raw['GasDate'] = pd.to_datetime(recent_raw['GasDate'], errors='coerce')
+        if 'LastUpdated' in recent_raw.columns:
+            recent_raw['LastUpdated'] = pd.to_datetime(recent_raw['LastUpdated'], errors='coerce')
+        else:
+            recent_raw['LastUpdated'] = pd.NaT
+
+        recent_nt = recent_raw[
+            recent_raw["State"].eq("NT") &
+            recent_raw["FacilityType"].eq("PROD")
+        ].copy()
+
+        recent = filter_nt_production(recent_raw)
         logger.info(
             "AEMO Last31 latest NT gas date: %s",
             recent['GasDate'].max() if not recent.empty else None
@@ -487,7 +499,11 @@ def fetch_aemo_data():
     )
     logger.info(
         "AEMO merged latest gas date by tracked facility: %s",
-        combined[combined['FacilityName'].isin(['Mereenie', 'Palm Valley', 'Yelcherr', 'SPCF'])]
+        combined[combined['FacilityName'].str.contains(
+            r'Mereenie|Palm Valley|Sturt Plateau|SPCF|Blacktip|Yelcherr|Yellerr',
+            case=False,
+            na=False
+        )]
         .groupby('FacilityName')['GasDate'].max().to_dict()
     )
     return combined.drop(columns=['_source_priority', '_source_name'])
@@ -601,7 +617,7 @@ def get_nt_data(session_maker):
         
         if not records:
             return pd.DataFrame()
-        
+
         # Convert to DataFrame
         data = []
         for record in records:
@@ -650,6 +666,99 @@ def get_cached_nt_data(database_url):
         return get_nt_data(session_maker)
     finally:
         engine.dispose()
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_aemo_reporting_status(nt_df, latest_nt_date):
+    """Load AEMO missing/late reports for reporting diagnostics only."""
+    missing_url = "https://nemweb.com.au/Reports/Current/GBB/GasBBMissingActualFlowAndStorage.CSV"
+    late_url = "https://nemweb.com.au/Reports/Current/GBB/GasBBLateActualFlowAndStorage.zip"
+
+    tracked = (
+        nt_df.sort_values('gas_date')
+        .groupby('nt_field', as_index=False)
+        .tail(1)[['nt_field', 'facility_id', 'facility_name', 'gas_date']]
+        .rename(columns={
+            'nt_field': 'Dashboard Source',
+            'facility_id': 'FacilityId',
+            'facility_name': 'AEMO Facility Name',
+            'gas_date': 'Latest Published Actual Flow'
+        })
+    )
+    if tracked.empty:
+        return pd.DataFrame()
+
+    def read_missing():
+        response = requests.get(missing_url, timeout=60)
+        response.raise_for_status()
+        frame = pd.read_csv(io.StringIO(response.text))
+        frame['GasDate'] = pd.to_datetime(frame['GasDate'], errors='coerce')
+        return frame
+
+    def read_late():
+        response = requests.get(late_url, timeout=60)
+        response.raise_for_status()
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            csv_name = next(name for name in archive.namelist() if name.lower().endswith('.csv'))
+            with archive.open(csv_name) as csv_file:
+                frame = pd.read_csv(csv_file)
+        frame['GasDate'] = pd.to_datetime(frame['GasDate'], errors='coerce')
+        return frame
+
+    try:
+        missing = read_missing()
+    except Exception as exc:
+        logger.warning("AEMO missing Actual Flow report unavailable: %s", exc)
+        missing = pd.DataFrame(columns=['GasDate', 'FacilityId', 'FacilityName'])
+
+    try:
+        late = read_late()
+    except Exception as exc:
+        logger.warning("AEMO late Actual Flow report unavailable: %s", exc)
+        late = pd.DataFrame(columns=['GasDate', 'FacilityId', 'FacilityName'])
+
+    rows = []
+    for source in tracked.itertuples(index=False):
+        missing_rows = missing[missing['FacilityId'].eq(source.FacilityId)]
+        late_rows = late[late['FacilityId'].eq(source.FacilityId)]
+        current_gap_start = source[3].normalize() + pd.Timedelta(days=1)
+        missing_dates = sorted(
+            missing_rows.loc[
+                missing_rows['GasDate'].between(current_gap_start, latest_nt_date),
+                'GasDate'
+            ].dropna().dt.normalize().unique()
+        )
+        late_dates = sorted(
+            late_rows.loc[
+                late_rows['GasDate'].between(current_gap_start, latest_nt_date),
+                'GasDate'
+            ].dropna().dt.normalize().unique()
+        )
+        lag_days = (latest_nt_date - source[3]).days
+
+        if missing_dates:
+            status = 'Missing reports'
+        elif late_dates:
+            status = 'Late according to AEMO'
+        elif lag_days == 0:
+            status = 'Current'
+        else:
+            status = 'Lagging - no later Actual Flow data currently published'
+
+        rows.append({
+            'Dashboard Source': source[0],
+            'AEMO Facility Name': source[2],
+            'Latest Published Actual Flow': source[3].strftime('%d %b %Y'),
+            'Reporting Lag (days)': lag_days,
+            'Missing gas dates identified by AEMO': ', '.join(
+                pd.Timestamp(date).strftime('%d %b') for date in missing_dates
+            ) or 'None identified',
+            'Late gas dates identified by AEMO': ', '.join(
+                pd.Timestamp(date).strftime('%d %b') for date in late_dates
+            ) or 'None identified',
+            'Status': status
+        })
+
+    return pd.DataFrame(rows)
 
 # ============================================================================
 # Metrics Calculation
@@ -1148,6 +1257,17 @@ def render_data_freshness(metrics, nt_df):
             "Recent observations are sourced from AEMO's Last31 Actual Flow dataset; "
             "historical observations are sourced from the full Actual Flow archive."
         )
+        st.caption(
+            "AEMO Reporting Status uses AEMO's Missing Actual Flow and Storage and "
+            "Late Actual Flow and Storage reports. These diagnostics do not alter production data."
+        )
+        reporting_status = fetch_aemo_reporting_status(
+            nt_df,
+            metrics['latest_date']
+        )
+        if not reporting_status.empty:
+            st.markdown("**AEMO Reporting Status**")
+            st.dataframe(reporting_status, hide_index=True, use_container_width=True)
         if metrics['qc_table'].empty:
             st.info("No production source data available")
             return
