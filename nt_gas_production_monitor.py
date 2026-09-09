@@ -611,6 +611,8 @@ def calculate_nt_metrics(nt_df):
             'latest_date': None,
             'common_date': None,
             'included_sources': [],
+            'latest_reported_total': None,
+            'latest_reported_by_source': {},
             'total_current': 0,
             'total_complete': False,
             'change_vs_prev': 0,
@@ -648,6 +650,7 @@ def calculate_nt_metrics(nt_df):
     
     # Calculate field-level averages
     field_metrics = {}
+    latest_reported_by_source = {}
     for field in get_producing_fields():
         field_daily = source_daily[source_daily['nt_field'] == field].copy()
         
@@ -656,6 +659,10 @@ def calculate_nt_metrics(nt_df):
             latest_supply = latest_row['supply']
             field_latest_date = latest_row['gas_date']
             reporting_lag = (latest_date - field_latest_date).days
+            latest_reported_by_source[field] = {
+                'value': latest_supply,
+                'date': field_latest_date
+            }
             
             # 7-day average
             last_7_days = field_daily.tail(7)
@@ -700,6 +707,9 @@ def calculate_nt_metrics(nt_df):
         daily_total.loc[daily_total['gas_date'].eq(common_date), 'total_supply'].iloc[0]
         if total_complete else None
     )
+    latest_reported_total = sum(
+        source_data['value'] for source_data in latest_reported_by_source.values()
+    )
     
     # Previous day comparison
     if len(daily_total) > 1:
@@ -737,6 +747,8 @@ def calculate_nt_metrics(nt_df):
         'latest_date': latest_date,
         'common_date': common_date,
         'included_sources': source_names,
+        'latest_reported_total': latest_reported_total,
+        'latest_reported_by_source': latest_reported_by_source,
         'total_current': total_current,
         'total_complete': total_complete,
         'change_vs_prev': change_vs_prev,
@@ -831,6 +843,7 @@ def calculate_basin_metrics(nt_df, common_date=None):
             # Basin has no production data
             basin_metrics[basin_name] = {
                 'status': 'awaiting_data',
+                'comparison_date': common_date,
                 'current': 0,
                 'avg_30d': 0,
                 'nt_share': 0,
@@ -922,6 +935,7 @@ def calculate_basin_metrics(nt_df, common_date=None):
         
         basin_metrics[basin_name] = {
             'status': status,
+            'comparison_date': latest_date,
             'current': current,
             'avg_30d': avg_30d,
             'nt_share': nt_share,
@@ -951,15 +965,40 @@ def render_header(metrics):
             "Northern Territory gas production at a glance • "
             f"Latest AEMO data: {date_str} • Reporting dates vary by facility"
         )
+        latest_by_basin = {}
+        for source_name, source_metrics in metrics['fields'].items():
+            if source_metrics.get('has_data'):
+                basin = NT_FIELDS[source_name]['basin']
+                latest_by_basin[basin] = max(
+                    latest_by_basin.get(basin, source_metrics['latest_date']),
+                    source_metrics['latest_date']
+                )
+        lag_summary = '; '.join(
+            f"{basin} data available through {date.strftime('%d %b %Y')}"
+            for basin, date in latest_by_basin.items()
+        )
+        if lag_summary:
+            st.caption(f"Reporting lag: {lag_summary}.")
     else:
         st.caption("Northern Territory gas production at a glance")
 
 def render_headline_kpi(metrics):
     """Render main production KPI with prominent total and supporting metrics"""
-    col1, col2, col3 = st.columns([3, 1.5, 1.5])
+    col1, col2, col3 = st.columns([2.3, 2.3, 1.4])
     
     with col1:
-        # Prominent primary KPI
+        st.metric(
+            label="Latest Reported NT Production",
+            value=(
+                f"{metrics['latest_reported_total']:.1f} TJ/d"
+                if metrics['latest_reported_total'] is not None else "N/A"
+            )
+        )
+        st.caption("Latest available values by source - reporting dates vary")
+        st.caption("Source dates: see Data Freshness")
+
+    with col2:
+        # Prominent aligned KPI
         delta_text = None
         if (
             metrics['total_complete']
@@ -970,7 +1009,7 @@ def render_headline_kpi(metrics):
             delta_text = f"{change_vs_7d:+.1f} TJ/d vs 7-day avg"
         
         st.metric(
-            label="Reported NT Gas Production",
+            label="Latest Fully Aligned NT Production",
             value=(
                 f"{metrics['total_current']:.1f} TJ/d"
                 if metrics['total_complete']
@@ -979,11 +1018,11 @@ def render_headline_kpi(metrics):
             delta=delta_text
         )
         if metrics['common_date'] is not None:
-            st.caption(f"Gas date: {metrics['common_date'].strftime('%d %b %Y')}")
+            st.caption(f"Common gas date: {metrics['common_date'].strftime('%d %b %Y')}")
         else:
             st.caption("No common gas date available across included sources")
     
-    with col2:
+    with col3:
         st.metric(
             label="7-Day Average",
             value=(
@@ -992,11 +1031,9 @@ def render_headline_kpi(metrics):
             )
         )
         if metrics['avg_7d_total'] is None:
-            st.caption("7-day comparison unavailable - incomplete aligned reporting")
-    
-    with col3:
+            st.caption("Insufficient aligned reporting")
         producing_count = len([f for f, m in metrics['fields'].items() if m['has_data']])
-        st.metric(label="Tracked Sources", value=str(producing_count))
+        st.caption(f"Tracked sources: {producing_count}")
 
 def render_field_cards(metrics, nt_df):
     """Render compact professional field production cards"""
@@ -1229,16 +1266,13 @@ def render_basin_composition(metrics):
         'Beetaloo': '#95a5a6'
     }
     
-    common_rows = metrics['daily_by_field']
-    if metrics['common_date'] is not None:
-        common_rows = common_rows[common_rows['gas_date'].eq(metrics['common_date'])]
-    common_values = (
-        common_rows.set_index('nt_field')['supply']
-        if not common_rows.empty else pd.Series(dtype=float)
-    )
+    snapshot_values = {
+        source_name: source_data['value']
+        for source_name, source_data in metrics['latest_reported_by_source'].items()
+    }
 
     for basin_name, basin_config in BASINS.items():
-        total = sum(common_values.get(field, 0) for field in basin_config['fields'])
+        total = sum(snapshot_values.get(field, 0) for field in basin_config['fields'])
         basin_totals[basin_name] = total
     
     total_all = sum(basin_totals.values())
@@ -1271,6 +1305,13 @@ def render_basin_composition(metrics):
                 color_box = f'<div style="display: inline-block; width: 12px; height: 12px; background-color: {color}; border-radius: 2px; margin-right: 6px; vertical-align: middle;"></div>'
                 st.markdown(f'{color_box} **{basin_name} Basin**', unsafe_allow_html=True)
                 st.caption(f"{total:.1f} TJ/d ({percentage:.0f}% of NT total)")
+                basin_dates = [
+                    metrics['fields'][field]['latest_date']
+                    for field in basin_config['fields']
+                    if metrics['fields'].get(field, {}).get('has_data', False)
+                ]
+                if basin_dates:
+                    st.caption(f"Latest report: {max(basin_dates).strftime('%d %b %Y')}")
                 
                 # List producing fields
                 producing = [f for f in basin_config['fields'] 
@@ -1330,6 +1371,9 @@ def render_basin_performance(basin_metrics):
                 f"{metrics['current']:.1f} TJ/d"
                 if metrics['current'] is not None else "N/A"
             )
+            basin_comparison_date = metrics.get('comparison_date')
+            if metrics['current'] is not None and basin_comparison_date is not None:
+                st.caption(f"Latest report: {basin_comparison_date.strftime('%d %b %Y')}")
         
         with cols[1]:
             st.metric("30d Avg", f"{metrics['avg_30d']:.1f} TJ/d")
@@ -1405,13 +1449,19 @@ def render_basin_performance(basin_metrics):
         **Reporting dates**
 
         AEMO reporting availability may vary by facility. Current values on individual field/facility cards represent the latest reported value for that source and may therefore relate to different gas dates. NT-wide totals, shares and rolling averages use aligned common reporting dates and do not combine production from different gas dates. Missing production reports are not treated as zero.
+
+        **Latest Reported vs Fully Aligned**
+
+        **Latest Reported** is the latest observation for each tracked source and may combine values from different gas dates. It is a latest available market snapshot, not a same-day total.
+
+        **Fully Aligned** is the sum of all included sources on the latest gas date where every required source has a valid observation. NT-wide rolling averages and historical comparisons use only fully aligned dates.
         
-        **Current**: Latest reported daily basin production (TJ/d) from the most recent gas date.
+        **Current**: Basin production on the common aligned NT gas date when available. If no common date exists, the value is not used for NT Share comparisons.
         
         **30d Avg**: Arithmetic mean of total daily basin production over the latest 30 gas days. 
         Production is first aggregated to basin/day, then averaged.
         
-        **NT Share**: Basin's percentage of total NT gas production on the latest gas date:  
+        **NT Share**: Basin's percentage of total NT gas production on the common aligned gas date:  
         `(basin current / total NT current) × 100`
         
         **90d Change**: Compares the latest 30-day average with the 30-day average ending 90 days earlier.  
