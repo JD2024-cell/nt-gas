@@ -1443,10 +1443,15 @@ def render_nt_history_chart(metrics):
             field_data = df[df['nt_field'] == field_name].copy()
             
             if not field_data.empty:
+                legend_label = (
+                    "Shenandoah South"
+                    if field_name == "Sturt Plateau Gas Plant"
+                    else field_name
+                )
                 fig.add_trace(go.Scatter(
                     x=field_data['gas_date'],
                     y=field_data['supply'],
-                    name=field_name,
+                    name=legend_label,
                     mode='lines',
                     stackgroup='one',
                     fillcolor=get_field_color(field_name),
@@ -1467,31 +1472,37 @@ def render_nt_history_chart(metrics):
     fig.update_layout(
         height=420,
         hovermode='x unified',
+        font=dict(color='#1a1a1a', size=11),
         xaxis_title='',
         yaxis_title='Production (TJ/day)',
-        margin=dict(t=15, b=50, l=42, r=10),
+        margin=dict(t=15, b=45, l=42, r=10),
         legend=dict(
             orientation="h",
             yanchor="top",
-            y=-0.15,
+            y=-0.12,
             xanchor="center",
             x=0.5,
-            font=dict(size=10.5)
+            font=dict(color='#1a1a1a', size=10.5),
+            bgcolor='rgba(255, 255, 255, 0.9)'
         ),
         plot_bgcolor='white',
         paper_bgcolor='white',
         xaxis=dict(
             showgrid=True,
             gridcolor='#f0f0f0',
-            tickfont=dict(size=10.5)
+            tickfont=dict(color='#1a1a1a', size=10.5),
+            linecolor='#e0e0e0',
+            showline=True
         ),
         yaxis=dict(
             showgrid=True,
             gridcolor='#f0f0f0',
-            tickfont=dict(size=10.5),
+            tickfont=dict(color='#1a1a1a', size=10.5),
+            linecolor='#e0e0e0',
+            showline=True,
             title=dict(
                 text='Production (TJ/day)',
-                font=dict(size=11)
+                font=dict(color='#1a1a1a', size=11)
             )
         )
     )
