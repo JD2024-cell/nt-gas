@@ -24,6 +24,8 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, 
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.sql import func
 from sqlalchemy.pool import NullPool
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 # Local configuration
 from nt_config import (
@@ -552,45 +554,71 @@ def upsert_gbb_data(engine, session_maker, df):
     """
     Upsert GBB data to database using (gas_date, facility_id) as unique key.
     Does NOT delete existing records - preserves history.
-    Works with both SQLite and PostgreSQL.
+    Uses high-performance batch upsert for PostgreSQL and SQLite.
     """
     if df is None or df.empty:
         return False
     
+    session = None
     try:
         session = session_maker()
-
-        if session.query(GBBRecord).count() == 0:
-            batch_size = 1000
-            for start in range(0, len(df), batch_size):
-                records = df.iloc[start:start + batch_size].to_dict('records')
-                session.bulk_insert_mappings(
-                    GBBRecord,
-                    records
-                )
-                session.commit()
-            session.close()
-            return True
-
+        dialect_name = engine.dialect.name
+        
+        # Prepare records and clean NaN/NaT values to Python None for SQL NULL
         records = df.to_dict('records')
-        
-        for record in records:
-            # Check if record exists
-            existing = session.query(GBBRecord).filter_by(
-                gas_date=record['gas_date'],
-                facility_id=record['facility_id']
-            ).first()
+        clean_records = [
+            {k: (None if pd.isna(v) else v) for k, v in r.items()}
+            for r in records
+        ]
+
+        batch_size = 1000
+        for start in range(0, len(clean_records), batch_size):
+            batch = clean_records[start:start + batch_size]
+            if not batch:
+                continue
             
-            if existing:
-                # Update existing record
-                for key, value in record.items():
-                    if key != 'id':  # Don't update primary key
-                        setattr(existing, key, value)
+            if dialect_name == 'postgresql':
+                stmt = pg_insert(GBBRecord).values(batch)
+                update_dict = {
+                    c.name: getattr(stmt.excluded, c.name)
+                    for c in GBBRecord.__table__.columns
+                    if c.name not in ('id', 'imported_date')
+                }
+                update_dict['imported_date'] = func.now()
+                stmt = stmt.on_conflict_do_update(
+                    constraint='uix_gas_date_facility',
+                    set_=update_dict
+                )
+                session.execute(stmt)
+            elif dialect_name == 'sqlite':
+                stmt = sqlite_insert(GBBRecord).values(batch)
+                update_dict = {
+                    c.name: getattr(stmt.excluded, c.name)
+                    for c in GBBRecord.__table__.columns
+                    if c.name not in ('id', 'imported_date')
+                }
+                update_dict['imported_date'] = func.now()
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=['gas_date', 'facility_id'],
+                    set_=update_dict
+                )
+                session.execute(stmt)
             else:
-                # Insert new record
-                new_record = GBBRecord(**record)
-                session.add(new_record)
-        
+                # Generic fallback using no_autoflush
+                with session.no_autoflush:
+                    for record in batch:
+                        existing = session.query(GBBRecord).filter_by(
+                            gas_date=record['gas_date'],
+                            facility_id=record['facility_id']
+                        ).first()
+                        if existing:
+                            for key, value in record.items():
+                                if key != 'id':
+                                    setattr(existing, key, value)
+                        else:
+                            session.add(GBBRecord(**record))
+                session.flush()
+
         session.commit()
         session.close()
         return True
@@ -600,6 +628,7 @@ def upsert_gbb_data(engine, session_maker, df):
             session.rollback()
             session.close()
         st.error(f"Failed to upsert data: {str(e)}")
+        logger.exception("Failed to upsert data: %s", e)
         return False
 
 def get_nt_data(session_maker):
