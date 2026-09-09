@@ -1765,6 +1765,8 @@ def render_admin_section(engine, session_maker):
         with col2:
             if st.button("Refresh AEMO Data", type="primary"):
                 with st.spinner("Fetching latest AEMO data..."):
+                    fetch_aemo_data.clear()
+                    st.cache_data.clear()
                     raw_df = fetch_aemo_data()
                     
                     if raw_df is not None:
@@ -1861,15 +1863,23 @@ def main():
         
         # Check if we need to fetch data
         should_fetch = False
+        fetch_reason = ""
         
         if record_count == 0:
             # No data at all - definitely fetch
             should_fetch = True
             fetch_reason = "No data in database"
         else:
-            # Existing data is read from the database on normal Streamlit reruns.
-            # New AEMO files are fetched through the explicit refresh control.
-            should_fetch = False
+            # Automatically refresh if data is older than 1 hour
+            latest_import = session.query(func.max(GBBRecord.imported_date)).scalar()
+            if latest_import:
+                hours_since_import = (datetime.now() - latest_import).total_seconds() / 3600
+                if hours_since_import > 1:
+                    should_fetch = True
+                    fetch_reason = f"Data is {hours_since_import:.1f} hours old"
+            else:
+                should_fetch = True
+                fetch_reason = "No previous import recorded"
         
         session.close()
         
