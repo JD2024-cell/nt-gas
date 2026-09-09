@@ -1267,7 +1267,7 @@ def render_data_freshness(metrics, nt_df):
         )
         if not reporting_status.empty:
             st.markdown("**AEMO Reporting Status**")
-            st.dataframe(reporting_status, hide_index=True, use_container_width=True)
+            st.dataframe(reporting_status, hide_index=True, width="stretch")
         if metrics['qc_table'].empty:
             st.info("No production source data available")
             return
@@ -1283,13 +1283,13 @@ def render_data_freshness(metrics, nt_df):
         st.dataframe(
             freshness[['Production Source', 'Basin', 'Latest AEMO Gas Date', 'Reporting Lag']],
             hide_index=True,
-            use_container_width=True
+            width="stretch"
         )
 
         st.markdown("**Production source QC**")
         qc_display = metrics['qc_table'].copy()
         qc_display['Latest AEMO Gas Date'] = qc_display['Latest AEMO Gas Date'].dt.strftime('%d %b %Y')
-        st.dataframe(qc_display, hide_index=True, use_container_width=True)
+        st.dataframe(qc_display, hide_index=True, width="stretch")
 
         st.markdown("**Data lineage diagnostics**")
         lineage_rows = []
@@ -1305,7 +1305,7 @@ def render_data_freshness(metrics, nt_df):
                 'Latest Value': latest_row['supply'],
                 'Record Count': len(source_df)
             })
-        st.dataframe(pd.DataFrame(lineage_rows), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(lineage_rows), hide_index=True, width="stretch")
 
         if metrics['total_complete']:
             common_rows = metrics['daily_by_field'][
@@ -1336,7 +1336,7 @@ def render_data_freshness(metrics, nt_df):
                         'total_supply': 'NT total (TJ/d)'
                     }),
                     hide_index=True,
-                    use_container_width=True
+                    width="stretch"
                 )
             else:
                 st.caption("7-day NT average: N/A - insufficient aligned reporting")
