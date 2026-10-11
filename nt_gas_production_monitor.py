@@ -20,6 +20,7 @@ import logging
 import hmac
 from io import StringIO
 from datetime import datetime, timedelta
+from plotly.subplots import make_subplots
 # Database imports
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, UniqueConstraint
 from sqlalchemy.orm import sessionmaker, declarative_base
@@ -34,6 +35,7 @@ from nt_config import (
     get_field_for_facility, get_producing_fields, 
     get_awaiting_fields, get_field_color
 )
+import nt_pipeline_flows as pf
 
 logger = logging.getLogger(__name__)
 
@@ -1962,6 +1964,327 @@ def render_admin_section(engine, session_maker):
             st.error(f"Database query failed: {str(e)}")
 
 # ============================================================================
+# Additional NT Gas Supply Flows (AEMO Pipeline Connection Flow)
+# ============================================================================
+
+def refresh_additional_flows_if_needed(engine):
+    """
+    Refresh the latest 31 days (about 2 MB) when stale; attempts are throttled across sessions by the
+    ingestion log. The 27 MB history is never downloaded while rendering: an uninitialised table is
+    reported and loaded explicitly (CLI or admin button).
+    Returns (status, message) with status 'ok', 'not_initialised' or 'error'.
+    """
+    pf.ensure_schema(engine)
+    should_refresh, reason = pf.refresh_decision(engine)
+    if reason == "not_initialised":
+        return "not_initialised", None
+    if not should_refresh:
+        return "ok", None
+    try:
+        with st.spinner("Refreshing AEMO pipeline flows..."):
+            result = pf.refresh_latest(engine)
+        logger.info("Pipeline flow refresh: %s", result)
+        get_cached_additional_flows.clear()
+        return "ok", None
+    except pf.IngestionBusyError:
+        return "ok", None
+    except (pf.AemoUnavailableError, pf.AemoDataError) as exc:
+        logger.warning("Pipeline flow refresh failed: %s", exc)
+        return "error", f"AEMO pipeline flow data could not be refreshed: {exc} Showing previously stored data."
+    except Exception as exc:
+        logger.exception("Pipeline flow refresh failed: %s", exc)
+        return "error", f"Pipeline flow refresh failed ({exc.__class__.__name__}: {exc}). Showing previously stored data."
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_cached_additional_flows(_engine, db_key, state_token, check_config):
+    """Derived flow table; db_key and state_token invalidate the cache per database and after each ingestion."""
+    return pf.compute_additional_flows(pf.load_flow_records(_engine), config=check_config)
+
+def _flow_sparkline(series, color):
+    recent = series.loc[series.index.max() - pd.Timedelta(days=89):]
+    fig = go.Figure(go.Scatter(
+        x=recent.index, y=recent.values, mode='lines',
+        line=dict(color=color, width=1.5), connectgaps=False,
+        fill='tozeroy', fillcolor='rgba(150,150,150,0.12)',
+        hovertemplate='%{x|%d %b %Y}: %{y:.1f} TJ/d<extra></extra>'
+    ))
+    fig.update_layout(
+        height=90, margin=dict(t=2, b=2, l=2, r=2), showlegend=False,
+        plot_bgcolor='white', paper_bgcolor='white',
+        xaxis=dict(visible=False), yaxis=dict(visible=False, rangemode='tozero')
+    )
+    return fig
+
+def render_additional_flow_cards(flows):
+    cols = st.columns(len(pf.DISPLAY_SOURCES))
+    for col, (key, cfg) in zip(cols, pf.DISPLAY_SOURCES.items()):
+        series = flows[cfg['column']]
+        info = pf.summarise_flow(series)
+        with col:
+            pill = (
+                '<span class="trend-pill trend-stable">Net flow</span>'
+                if key == 'ngp_net_westward'
+                else '<span class="trend-pill trend-stable">Inferred mapping</span>'
+            )
+            if not info['has_data']:
+                st.markdown(
+                    f'<div class="field-card"><div class="field-card-header">{cfg["label"]} {pill}</div>'
+                    '<div class="field-card-avg" style="color: #999; font-style: italic;">No AEMO data available</div></div>',
+                    unsafe_allow_html=True
+                )
+                continue
+            avg_text = (
+                f"{info['avg_7d']:.1f} TJ/d" if info['avg_7d'] is not None
+                else f"N/A ({info['days_in_window']} of 7 days reported)"
+            )
+            active_text = (
+                f"Last flow above {pf.ACTIVE_FLOW_THRESHOLD:g} TJ/d: {info['last_active_date'].strftime('%d %b %Y')}"
+                if info['last_active_date'] is not None
+                else f"No flow above {pf.ACTIVE_FLOW_THRESHOLD:g} TJ/d in history"
+            )
+            st.markdown(
+                f"""
+                <div class="field-card">
+                    <div class="field-card-header">{cfg['label']} {pill}</div>
+                    <div class="field-card-meta">Pipeline connection flow</div>
+                    <div class="field-card-value">{info['latest']:.1f} <span style="font-size: 0.6em; color: #666;">TJ/d</span></div>
+                    <div class="field-card-avg">7-day average: {avg_text}</div>
+                    <div class="field-card-meta">Latest gas date: {info['latest_date'].strftime('%d %b %Y')}</div>
+                    <div class="field-card-meta">{active_text}</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+            st.caption("Last 90 days")
+            st.plotly_chart(
+                _flow_sparkline(series, cfg['color']),
+                width='stretch',
+                config={'displayModeBar': False},
+                key=f"addl_flow_spark_{key}"
+            )
+
+def render_additional_flow_chart(flows):
+    st.markdown("**Historical flows**")
+    labels = {key: cfg['label'] for key, cfg in pf.DISPLAY_SOURCES.items()}
+    selected = st.multiselect(
+        "Select flows",
+        list(labels),
+        default=list(labels),
+        format_func=lambda key: labels[key],
+        key="addl_flow_sources"
+    )
+    ctrl1, ctrl2 = st.columns(2)
+    with ctrl1:
+        period = st.radio(
+            "Time Period", ["1M", "3M", "6M", "1Y", "All"], index=3,
+            horizontal=True, key="addl_flow_period"
+        )
+    with ctrl2:
+        layout = st.radio(
+            "Layout", ["Overlay", "Separate panels"], horizontal=True, key="addl_flow_layout"
+        )
+    if not selected:
+        st.info("Select one or more flows to view history")
+        return
+
+    days = {"1M": 30, "3M": 90, "6M": 180, "1Y": 365}.get(period)
+    end = flows.index.max()
+    window = flows if days is None else flows.loc[end - pd.Timedelta(days=days):]
+
+    if layout == "Overlay":
+        fig = go.Figure()
+        rows = 1
+    else:
+        rows = len(selected)
+        fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.06)
+    for position, key in enumerate(selected, start=1):
+        cfg = pf.DISPLAY_SOURCES[key]
+        trace = go.Scatter(
+            x=window.index, y=window[cfg['column']], name=cfg['chart_label'], mode='lines',
+            line=dict(width=2, color=cfg['color']), connectgaps=False
+        )
+        if layout == "Overlay":
+            fig.add_trace(trace)
+        else:
+            fig.add_trace(trace, row=position, col=1)
+            fig.update_yaxes(title_text="TJ/d", row=position, col=1, showgrid=True, gridcolor='#f0f0f0')
+    fig.update_layout(
+        height=350 if layout == "Overlay" else 200 * rows + 60,
+        hovermode='x unified',
+        font=dict(color='#1a1a1a', size=11),
+        yaxis_title='Flow (TJ/day)' if layout == "Overlay" else None,
+        margin=dict(t=10, b=40, l=50, r=20),
+        plot_bgcolor='white', paper_bgcolor='white',
+        xaxis=dict(showgrid=True, gridcolor='#f0f0f0'),
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1, font=dict(size=11))
+    )
+    if layout == "Overlay":
+        fig.update_yaxes(showgrid=True, gridcolor='#f0f0f0')
+    st.plotly_chart(fig, width='stretch', key="addl_flow_history_chart")
+    st.caption("Series are plotted separately and are not summed. Gaps indicate unpublished or missing reports, not zero flow.")
+
+def render_ngp_diagnostics(flows, check_config):
+    with st.expander("NGP netting diagnostics"):
+        st.caption(
+            "NGP net westward is the net flow at the AGP interface: max(0, AGP receipt 1808073 - AGP delivery 1808011). "
+            "Mt Isa net receipts (1490098 - 1404296) are a cross-check only and are never added to it. "
+            "Blank cells are missing reports, not zero."
+        )
+        st.caption(
+            f"Cross-check thresholds: difference above {check_config.abs_tol:g} TJ/d and above "
+            f"{check_config.rel_tol:.0%} of the larger flow, compared separately for westward and eastward flow. "
+            f"Percentage differences are shown only when that flow is at least {check_config.rel_min_flow:g} TJ/d. "
+            "Set NT_NGP_CHECK_ABS_TOL, NT_NGP_CHECK_REL_TOL or NT_NGP_CHECK_REL_MIN_FLOW to change them."
+        )
+        checked = flows[flows['ngp_check_status'] != 'unavailable']
+        if not checked.empty:
+            recent_checked = checked.loc[checked.index.max() - pd.Timedelta(days=30):]
+            counts = checked['ngp_check_direction'].value_counts()
+            recent_counts = recent_checked['ngp_check_direction'].value_counts()
+            st.caption(
+                f"Flagged days since {checked.index.min().strftime('%d %b %Y')}: "
+                f"{int(counts.get('westward', 0))} westward, {int(counts.get('eastward', 0))} eastward, "
+                f"{int(counts.get('both', 0))} both. Last 31 gas days: "
+                f"{int(recent_counts.get('westward', 0))} westward, {int(recent_counts.get('eastward', 0))} eastward, "
+                f"{int(recent_counts.get('both', 0))} both."
+            )
+        st.caption(
+            "A difference means gas reported entering the NGP did not equal gas reported leaving it that day. "
+            "The public data do not show whether this is linepack, fuel, losses, timing or measurement, "
+            "so no cause is assigned."
+        )
+        recent = flows.loc[flows.index.max() - pd.Timedelta(days=30):]
+        table = recent[[
+            'ngp_gross_westward', 'ngp_gross_eastward', 'ngp_net_signed', 'ngp_net_westward',
+            'mt_isa_net_signed', 'ngp_check_diff', 'ngp_check_rel_diff', 'ngp_check_status',
+            'ngp_check_direction', 'ngp_west_boundary_diff', 'ngp_pipeline_imbalance', 'qld_boundary_diff'
+        ]].copy()
+        table['ngp_check_rel_diff'] = table['ngp_check_rel_diff'] * 100
+        table = table.round(3)
+        table.insert(0, 'Gas date', table.index.strftime('%d %b %Y'))
+        table = table.rename(columns={
+            'ngp_gross_westward': 'Gross westward, AGP receipt (TJ/d)',
+            'ngp_gross_eastward': 'Gross eastward, AGP delivery (TJ/d)',
+            'ngp_net_signed': 'Net signed, + = westward (TJ/d)',
+            'ngp_net_westward': 'Net westward, floored at 0 (TJ/d)',
+            'mt_isa_net_signed': 'Mt Isa net receipt (TJ/d)',
+            'ngp_check_diff': 'Difference (TJ/d)',
+            'ngp_check_rel_diff': 'Relative difference (%)',
+            'ngp_check_status': 'Cross-check',
+            'ngp_check_direction': 'Flagged direction',
+            'ngp_west_boundary_diff': 'AGP vs NGP-reported net (TJ/d)',
+            'ngp_pipeline_imbalance': 'NGP gas in minus out (TJ/d)',
+            'qld_boundary_diff': 'Mt Isa vs CGP-reported net (TJ/d)',
+        })
+        st.dataframe(table.iloc[::-1], hide_index=True, width="stretch")
+
+def render_additional_flow_methodology():
+    with st.expander("Additional NT Gas Supply Flows - Methodology"):
+        st.markdown("""
+        **Source:** AEMO Gas Bulletin Board Pipeline Connection Flow, daily actual flow in TJ per gas day, as reported by facility operators. Only records with Quality = OK are used; other records stay in the database but display as missing.
+
+        **Ichthys and Darwin LNG (inferred mappings):** Ichthys domestic gas is the Wickham Point Pipeline *Bladin Point Entry DS* receipt (ConnectionPointId 1808064). Darwin LNG domestic gas is the Wickham Point Pipeline *Wickham Point Entry DS* receipt (ConnectionPointId 1808025). AEMO does not name the gas source at these points, so the attribution to INPEX Ichthys and Darwin LNG is inferred from the connection-point names. LNG feedgas is not reported publicly; these series are domestic gas delivered into the NT network only. Darwin LNG flows are approximately zero in 2026; its history is retained.
+
+        **NGP net westward:** the AGP-side westward receipt (1808073) includes gas that the AGP also delivers to the NGP on the same gas day (1808011), so the two are netted: `max(0, receipt - delivery)`. The result is the net flow at the AGP interface. The AGP and NGP operators sometimes split the same net flow into different gross westward and eastward quantities, so only the net is used. The signed net value (negative = net eastward), the gross quantities and a cross-check against Mt Isa net receipts (1490098 - 1404296) are available in the NGP netting diagnostics. The two pipeline ends can disagree; the public data do not show why (linepack, fuel, losses, timing or measurement), so differences are flagged and not adjusted. If either input is missing the net value is missing, not zero.
+
+        **Dingo:** not included. No daily AEMO reporting point has been verified for the Dingo field, and Palm Valley Pipeline flows are not used as a substitute.
+
+        **Not additive:** these flows are shown separately and are not included in the NT field-production total above. No combined NT supply total is shown because measurement boundaries and double counting between these sources and field production have not been assessed.
+
+        **7-day average:** mean of the seven gas days ending on the latest available date; shown only when all seven days are reported.
+        """)
+
+def render_additional_flows_section(engine):
+    """Render the additional supply flows section; failures never affect the sections above it."""
+    st.markdown("---")
+    st.subheader("Additional NT Gas Supply Flows")
+    st.caption(
+        "Separate from the field-production total above and not added to it. "
+        "Source: AEMO Pipeline Connection Flow, TJ/d."
+    )
+    check_config = pf.NgpCheckConfig.from_env()
+    try:
+        status, message = refresh_additional_flows_if_needed(engine)
+        if status == "not_initialised":
+            st.info(
+                "Pipeline flow history has not been loaded yet. Run `python -m nt_pipeline_flows init` or use "
+                "Pipeline Flow Ingestion in the admin area below. The 27 MB history is deliberately not "
+                "downloaded while the dashboard is viewed."
+            )
+            render_additional_flow_methodology()
+            return
+        if message:
+            st.warning(message)
+        token = pf.get_ingestion_state(engine)
+        flows = get_cached_additional_flows(
+            engine, engine.url.render_as_string(hide_password=True), token, check_config)
+    except Exception as exc:
+        logger.exception("Additional flows unavailable: %s", exc)
+        st.warning(f"Additional NT gas supply flows are unavailable: {exc}")
+        render_additional_flow_methodology()
+        return
+
+    if flows is None or flows.empty:
+        st.info("No pipeline connection flow data is available yet.")
+    else:
+        render_additional_flow_cards(flows)
+        render_additional_flow_chart(flows)
+        render_ngp_diagnostics(flows, check_config)
+    render_additional_flow_methodology()
+
+def render_flow_admin(engine):
+    """Manual controls for the pipeline-flow table."""
+    with st.expander("Pipeline Flow Ingestion"):
+        try:
+            pf.ensure_schema(engine)
+            row_count, last_update, latest_date = pf.get_ingestion_state(engine)
+            st.caption(
+                f"Rows: {row_count:,} | Latest gas date: {latest_date} | Last update: "
+                f"{last_update.strftime('%Y-%m-%d %H:%M') if last_update else 'never'}"
+            )
+            last_attempt = pf.last_ingestion(engine)
+            if last_attempt:
+                detail = f" - {last_attempt['message']}" if last_attempt.get('message') else ""
+                st.caption(
+                    f"Last attempt: {last_attempt['mode']} / {last_attempt['status']} at "
+                    f"{last_attempt['started_at'].strftime('%Y-%m-%d %H:%M')}{detail}"
+                )
+            invalidated = pf.count_invalidated(engine)
+            if invalidated:
+                st.caption(
+                    f"{invalidated} stored value(s) were invalidated by newer AEMO records; "
+                    "the replaced values are kept in superseded_quantity."
+                )
+            absent_points = pf.missing_points(engine) if row_count else []
+            if absent_points:
+                st.warning(
+                    "No stored rows for: " + ", ".join(absent_points) +
+                    ". Reload the full history to populate them."
+                )
+        except Exception as exc:
+            st.error(f"Pipeline flow table unavailable: {exc}")
+            return
+        st.caption("The 27 MB history download only runs from here or from `python -m nt_pipeline_flows init`.")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Refresh latest flows (Last31)", key="flow_refresh_latest"):
+                with st.spinner("Refreshing..."):
+                    try:
+                        st.success(f"Done: {pf.refresh_latest(engine)}")
+                        get_cached_additional_flows.clear()
+                    except Exception as exc:
+                        st.error(f"Refresh failed: {exc}")
+        with col2:
+            confirmed = st.checkbox("Confirm 27 MB download", key="flow_confirm_history")
+            if st.button("Load / reload full flow history", key="flow_reload_history", disabled=not confirmed):
+                with st.spinner("Loading history (downloads about 27 MB)..."):
+                    try:
+                        st.success(f"Done: {pf.initialise_history(engine)}")
+                        get_cached_additional_flows.clear()
+                    except Exception as exc:
+                        st.error(f"Load failed: {exc}")
+
+# ============================================================================
 # Main Application
 # ============================================================================
 
@@ -2069,9 +2392,11 @@ def main():
     render_basin_composition(metrics)
     render_basin_performance(basin_metrics)  # New basin performance section
     render_field_analysis(metrics, nt_df)  # Optional deeper analysis at bottom
+    render_additional_flows_section(engine)
     
     # Admin section
     render_admin_section(engine, Session)
+    render_flow_admin(engine)
     
     # Improved footer
     st.markdown("---")
