@@ -12,8 +12,8 @@ Storage is a dedicated table (`gbb_pipeline_connection_flow`), independent of th
 Tracked connection points (identified by FacilityId + ConnectionPointId + FlowDirection, never
 by name, because names repeat and change). Headline points:
 
-  Ichthys domestic gas   WPP 580030  Bladin Point Entry DS   1808064 RECEIPT  (attribution inferred from name)
-  Darwin LNG domestic    WPP 580030  Wickham Point Entry DS  1808025 RECEIPT  (attribution inferred from name)
+  Bladin Point gas supply (Ichthys - inferred)       WPP 580030  Bladin Point Entry DS   1808064 RECEIPT
+  Wickham Point gas supply (Darwin LNG - inferred)   WPP 580030  Wickham Point Entry DS  1808025 RECEIPT
   NGP westward (gross)   AGP 580010  AGP NGP Entry Delivery  1808073 RECEIPT
   NGP eastward (gross)   AGP 580010  NGP                     1808011 DELIVERY
   Mt Isa receipt         NGP 580050  Mt Isa                  1490098 RECEIPT  (cross-check only)
@@ -92,21 +92,21 @@ NGP_CHECK_REL_MIN_FLOW = 5.0  # TJ/d; percentage differences are not reported be
 # Dashboard series. `column` is a column of compute_additional_flows().
 DISPLAY_SOURCES = {
     "ichthys_domestic": {
-        "label": "Ichthys domestic gas",
-        "chart_label": "Ichthys domestic gas (inferred mapping)",
+        "label": "Bladin Point gas supply (Ichthys - inferred)",
+        "chart_label": "Bladin Point gas supply (Ichthys - inferred)",
         "column": "ichthys_domestic",
         "color": "#1f77b4",
-        "note": "WPP Bladin Point Entry DS (1808064). Attribution to INPEX Ichthys inferred from the connection-point name.",
+        "note": "WPP Bladin Point Entry DS (1808064), an AEMO connection-point receipt. Attribution to INPEX Ichthys is inferred from the connection-point name and location, not independently confirmed.",
     },
     "darwin_lng_domestic": {
-        "label": "Darwin LNG domestic gas",
-        "chart_label": "Darwin LNG domestic gas (inferred mapping)",
+        "label": "Wickham Point gas supply (Darwin LNG - inferred)",
+        "chart_label": "Wickham Point gas supply (Darwin LNG - inferred)",
         "column": "darwin_lng_domestic",
         "color": "#d62728",
-        "note": "WPP Wickham Point Entry DS (1808025). Attribution to Darwin LNG inferred from the connection-point name.",
+        "note": "WPP Wickham Point Entry DS (1808025), an AEMO connection-point receipt. Attribution to Darwin LNG is inferred from the connection-point name and location, not independently confirmed.",
     },
     "ngp_net_westward": {
-        "label": "NGP net westward flow",
+        "label": "NGP net westward flow (AGP interface)",
         "chart_label": "NGP net westward flow (AGP interface)",
         "column": "ngp_net_westward",
         "color": "#2ca02c",
