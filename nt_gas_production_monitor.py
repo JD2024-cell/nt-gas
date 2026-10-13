@@ -18,11 +18,13 @@ import zipfile
 import io
 import logging
 import hmac
+import threading
+import time
 from io import StringIO
 from datetime import datetime, timedelta
 from plotly.subplots import make_subplots
 # Database imports
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, UniqueConstraint
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, UniqueConstraint, select
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.sql import func
 from sqlalchemy.pool import NullPool
@@ -747,23 +749,17 @@ def get_nt_data(session_maker):
         st.error(f"Failed to retrieve NT data: {str(e)}")
         return pd.DataFrame()
 
-@st.cache_data(ttl=300, show_spinner=False)
-def get_cached_nt_data(database_url):
-    """Cache the mapped NT dataframe between chart interactions."""
-    engine_options = {}
-    if database_url.startswith("sqlite"):
-        engine_options["connect_args"] = {
-            "timeout": 60,
-            "check_same_thread": False
-        }
-        engine_options["poolclass"] = NullPool
+@st.cache_data(ttl=21600, show_spinner=False)
+def get_cached_nt_data(_engine, db_key, data_token):
+    """Mapped NT dataframe, reloaded only when gbb_records has a newer import (data_token) or after 6 h."""
+    return get_nt_data(sessionmaker(bind=_engine))
 
-    engine = create_engine(database_url, **engine_options)
-    session_maker = sessionmaker(bind=engine)
-    try:
-        return get_nt_data(session_maker)
-    finally:
-        engine.dispose()
+@st.cache_data(show_spinner=False)
+def get_cached_metrics(nt_df):
+    """Production metrics for the loaded data; recomputed only when nt_df changes."""
+    metrics = calculate_nt_metrics(nt_df)
+    basin_metrics = calculate_basin_metrics(nt_df, metrics['common_date'])
+    return metrics, basin_metrics, validate_nt_metrics(metrics)
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_aemo_reporting_status(nt_df, latest_nt_date):
@@ -1359,13 +1355,17 @@ def render_data_freshness(metrics, nt_df):
             "AEMO Reporting Status uses AEMO's Missing Actual Flow and Storage and "
             "Late Actual Flow and Storage reports. These diagnostics do not alter production data."
         )
-        reporting_status = fetch_aemo_reporting_status(
-            nt_df,
-            metrics['latest_date']
-        )
-        if not reporting_status.empty:
-            st.markdown("**AEMO Reporting Status**")
-            st.dataframe(reporting_status, hide_index=True, width="stretch")
+        if st.checkbox(
+            "Load AEMO reporting status (downloads AEMO's missing and late reports)",
+            key="load_reporting_status"
+        ):
+            reporting_status = fetch_aemo_reporting_status(
+                nt_df,
+                metrics['latest_date']
+            )
+            if not reporting_status.empty:
+                st.markdown("**AEMO Reporting Status**")
+                st.dataframe(reporting_status, hide_index=True, width="stretch")
         if metrics['qc_table'].empty:
             st.info("No production source data available")
             return
@@ -1794,15 +1794,16 @@ def render_basin_performance(basin_metrics):
         """)
 
 def render_field_analysis(metrics, nt_df):
-    """Render compact field comparison/analysis section"""
+    """Field comparison section: collapsed expander; charts are built only after the user opts in."""
     st.markdown("---")
-    st.subheader("Field Comparison Analysis")
-    
-    with st.expander("Chart Controls", expanded=True):
+    with st.expander("Field Comparison Analysis", expanded=False):
         if nt_df.empty:
             st.info("No data available for field analysis")
             return
-        
+
+        if not st.checkbox("Load field comparison chart and controls", key="load_field_comparison"):
+            st.caption("Compare production trends for selected fields. Tick the box to load the chart.")
+            return
         available_fields = set(nt_df['nt_field'].dropna().unique())
         producing = [
             field_name for field_name in FIELD_DISPLAY_ORDER
@@ -1909,6 +1910,8 @@ def render_admin_section(engine, session_maker):
         
         st.markdown("---")
         st.markdown("### Database Status")
+        if not st.checkbox("Load database status and facility diagnostics", key="load_db_status"):
+            return
         
         try:
             session = session_maker()
@@ -1967,38 +1970,149 @@ def render_admin_section(engine, session_maker):
 # Additional NT Gas Supply Flows (AEMO Pipeline Connection Flow)
 # ============================================================================
 
-def refresh_additional_flows_if_needed(engine):
-    """
-    Refresh the latest 31 days (about 2 MB) when stale; attempts are throttled across sessions by the
-    ingestion log. The 27 MB history is never downloaded while rendering: an uninitialised table is
-    reported and loaded explicitly (CLI or admin button).
-    Returns (status, message) with status 'ok', 'not_initialised' or 'error'.
-    """
-    pf.ensure_schema(engine)
-    should_refresh, reason = pf.refresh_decision(engine)
-    if reason == "not_initialised":
-        return "not_initialised", None
-    if not should_refresh:
-        return "ok", None
-    try:
-        with st.spinner("Refreshing AEMO pipeline flows..."):
-            result = pf.refresh_latest(engine)
-        logger.info("Pipeline flow refresh: %s", result)
-        get_cached_additional_flows.clear()
-        return "ok", None
-    except pf.IngestionBusyError:
-        return "ok", None
-    except (pf.AemoUnavailableError, pf.AemoDataError) as exc:
-        logger.warning("Pipeline flow refresh failed: %s", exc)
-        return "error", f"AEMO pipeline flow data could not be refreshed: {exc} Showing previously stored data."
-    except Exception as exc:
-        logger.exception("Pipeline flow refresh failed: %s", exc)
-        return "error", f"Pipeline flow refresh failed ({exc.__class__.__name__}: {exc}). Showing previously stored data."
+def _db_key(engine):
+    return engine.url.render_as_string(hide_password=True)
 
-@st.cache_data(ttl=300, show_spinner=False)
+def production_refresh_decision(record_count, latest_import, now=None):
+    """Original auto-fetch rule: refresh when empty, never imported, or last import is over 1 hour old."""
+    now = now or datetime.now()
+    if record_count == 0:
+        return True, "No data in database"
+    if latest_import:
+        hours_since_import = (now - latest_import).total_seconds() / 3600
+        if hours_since_import > 1:
+            return True, f"Data is {hours_since_import:.1f} hours old"
+        return False, ""
+    return True, "No previous import recorded"
+
+@st.cache_resource
+def _ensure_flow_schema(db_key, _engine):
+    """Create/migrate the flow tables once per process instead of on every rerun."""
+    pf.ensure_schema(_engine)
+    return True
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_production_state(_engine, db_key):
+    """One small query for the production table's freshness, cached for 60 s across reruns."""
+    with _engine.connect() as conn:
+        record_count, latest_import = conn.execute(
+            select(func.count(GBBRecord.id), func.max(GBBRecord.imported_date))
+        ).one()
+    return {"record_count": int(record_count), "latest_import": latest_import}
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_flow_state(_engine, db_key):
+    """Pipeline-flow table state and refresh decision, cached for 60 s across reruns."""
+    _ensure_flow_schema(db_key, _engine)
+    rows, updated, latest = pf.get_ingestion_state(_engine)
+    should_refresh, reason = pf.refresh_decision(_engine)
+    return {"rows": rows, "token": (rows, updated, latest), "should_refresh": should_refresh, "reason": reason}
+
+@st.cache_data(ttl=21600, show_spinner=False)
 def get_cached_additional_flows(_engine, db_key, state_token, check_config):
-    """Derived flow table; db_key and state_token invalidate the cache per database and after each ingestion."""
-    return pf.compute_additional_flows(pf.load_flow_records(_engine), config=check_config)
+    """Derived flow table; reloaded only when the stored flows change (state_token) or after 6 h."""
+    records = pf.load_flow_records(_engine, columns=FLOW_RECORD_COLUMNS)
+    return pf.compute_additional_flows(records, config=check_config)
+
+FLOW_RECORD_COLUMNS = [
+    "gas_date", "facility_id", "connection_point_id", "flow_direction", "actual_quantity", "quality"
+]
+BACKGROUND_RETRY_SECONDS = 900
+
+def load_production_data_blocking(engine, Session, fetch_reason):
+    """First-ever load only (empty table): nothing can be shown yet, so this blocks as it always did."""
+    with st.spinner(f"Loading AEMO data... ({fetch_reason})"):
+        st.caption("Downloading and filtering NT AEMO records...")
+        fetch_aemo_data.clear()
+        raw_df = fetch_aemo_data()
+
+        if raw_df is not None:
+            st.caption(f"Preparing {len(raw_df):,} NT records for database import...")
+            normalized_df = normalize_aemo_data(raw_df)
+
+            if normalized_df is not None:
+                st.caption("Saving NT records to PostgreSQL in batches...")
+                success = upsert_gbb_data(engine, Session, normalized_df)
+
+                if success:
+                    st.success("✅ AEMO data loaded successfully")
+                    # Clear cache to ensure fresh calculations
+                    st.cache_data.clear()
+                else:
+                    st.warning("⚠️ Failed to load AEMO data - dashboard may show incomplete information")
+        else:
+            st.warning("⚠️ Unable to fetch AEMO data - dashboard may show incomplete information")
+
+@st.cache_resource
+def _refresh_manager():
+    """Process-wide state of the background AEMO refresh."""
+    return {"lock": threading.Lock(), "running": False, "last_attempt": 0.0, "completed": 0,
+            "error": None, "flow_error": None}
+
+def _background_refresh(engine, Session, mgr, refresh_production, refresh_flows):
+    """Runs in a worker thread: no Streamlit calls except cache invalidation."""
+    errors = []
+    try:
+        if refresh_production:
+            try:
+                fetch_aemo_data.clear()
+                raw_df = fetch_aemo_data()
+                normalized_df = normalize_aemo_data(raw_df) if raw_df is not None else None
+                if normalized_df is None or not upsert_gbb_data(engine, Session, normalized_df):
+                    errors.append("AEMO production data could not be refreshed.")
+            except Exception as exc:
+                logger.exception("Background production refresh failed: %s", exc)
+                errors.append(f"AEMO production data refresh failed ({exc.__class__.__name__}: {exc}).")
+        if refresh_flows:
+            mgr["flow_error"] = None
+            try:
+                logger.info("Pipeline flow refresh: %s", pf.refresh_latest(engine))
+            except pf.IngestionBusyError:
+                pass
+            except (pf.AemoUnavailableError, pf.AemoDataError) as exc:
+                logger.warning("Pipeline flow refresh failed: %s", exc)
+                mgr["flow_error"] = f"AEMO pipeline flow data could not be refreshed: {exc} Showing previously stored data."
+            except Exception as exc:
+                logger.exception("Pipeline flow refresh failed: %s", exc)
+                mgr["flow_error"] = (
+                    f"Pipeline flow refresh failed ({exc.__class__.__name__}: {exc}). Showing previously stored data.")
+        mgr["error"] = " ".join(errors) or None
+    finally:
+        for cached in (get_production_state, get_flow_state, get_cached_nt_data, get_cached_additional_flows):
+            cached.clear()
+        mgr["completed"] += 1
+        mgr["running"] = False
+
+def schedule_background_refresh(engine, Session, production_stale, flows_stale):
+    """Start one refresh thread when data is stale; rendering never waits for AEMO. Returns True if started."""
+    if not (production_stale or flows_stale):
+        return False
+    mgr = _refresh_manager()
+    with mgr["lock"]:
+        if mgr["running"] or time.time() - mgr["last_attempt"] < BACKGROUND_RETRY_SECONDS:
+            return False
+        mgr["running"] = True
+        mgr["last_attempt"] = time.time()
+    threading.Thread(
+        target=_background_refresh, args=(engine, Session, mgr, production_stale, flows_stale),
+        daemon=True, name="aemo-refresh"
+    ).start()
+    return True
+
+@st.fragment(run_every=3)
+def _refresh_watcher(seen_completed):
+    mgr = _refresh_manager()
+    if mgr["running"] and mgr["completed"] == seen_completed:
+        st.caption("Updating from AEMO in the background - this page refreshes automatically when new data is ready.")
+    else:
+        st.rerun()
+
+def render_refresh_status():
+    mgr = _refresh_manager()
+    if mgr["running"]:
+        _refresh_watcher(mgr["completed"])
+    elif mgr["error"]:
+        st.caption(f"AEMO refresh problem: {mgr['error']} Showing stored data.")
 
 def _flow_sparkline(series, color):
     recent = series.loc[series.index.max() - pd.Timedelta(days=89):]
@@ -2076,7 +2190,7 @@ def render_additional_flow_chart(flows):
     ctrl1, ctrl2 = st.columns(2)
     with ctrl1:
         period = st.radio(
-            "Time Period", ["1M", "3M", "6M", "1Y", "All"], index=3,
+            "Time Period", ["1M", "3M", "6M", "1Y", "All"], index=1,
             horizontal=True, key="addl_flow_period"
         )
     with ctrl2:
@@ -2204,8 +2318,9 @@ def render_additional_flows_section(engine):
     )
     check_config = pf.NgpCheckConfig.from_env()
     try:
-        status, message = refresh_additional_flows_if_needed(engine)
-        if status == "not_initialised":
+        db_key = _db_key(engine)
+        state = get_flow_state(engine, db_key)
+        if state["rows"] == 0:
             st.info(
                 "Pipeline flow history has not been loaded yet. Run `python -m nt_pipeline_flows init` or use "
                 "Pipeline Flow Ingestion in the admin area below. The 27 MB history is deliberately not "
@@ -2213,11 +2328,10 @@ def render_additional_flows_section(engine):
             )
             render_additional_flow_methodology()
             return
-        if message:
-            st.warning(message)
-        token = pf.get_ingestion_state(engine)
-        flows = get_cached_additional_flows(
-            engine, engine.url.render_as_string(hide_password=True), token, check_config)
+        flow_error = _refresh_manager()["flow_error"]
+        if flow_error:
+            st.warning(flow_error)
+        flows = get_cached_additional_flows(engine, db_key, state["token"], check_config)
     except Exception as exc:
         logger.exception("Additional flows unavailable: %s", exc)
         st.warning(f"Additional NT gas supply flows are unavailable: {exc}")
@@ -2233,37 +2347,36 @@ def render_additional_flows_section(engine):
     render_additional_flow_methodology()
 
 def render_flow_admin(engine):
-    """Manual controls for the pipeline-flow table."""
+    """Manual controls for the pipeline-flow table; status queries run only when requested."""
     with st.expander("Pipeline Flow Ingestion"):
-        try:
-            pf.ensure_schema(engine)
-            row_count, last_update, latest_date = pf.get_ingestion_state(engine)
-            st.caption(
-                f"Rows: {row_count:,} | Latest gas date: {latest_date} | Last update: "
-                f"{last_update.strftime('%Y-%m-%d %H:%M') if last_update else 'never'}"
-            )
-            last_attempt = pf.last_ingestion(engine)
-            if last_attempt:
-                detail = f" - {last_attempt['message']}" if last_attempt.get('message') else ""
+        if st.checkbox("Load ingestion status", key="load_flow_status"):
+            try:
+                row_count, last_update, latest_date = pf.get_ingestion_state(engine)
                 st.caption(
-                    f"Last attempt: {last_attempt['mode']} / {last_attempt['status']} at "
-                    f"{last_attempt['started_at'].strftime('%Y-%m-%d %H:%M')}{detail}"
+                    f"Rows: {row_count:,} | Latest gas date: {latest_date} | Last update: "
+                    f"{last_update.strftime('%Y-%m-%d %H:%M') if last_update else 'never'}"
                 )
-            invalidated = pf.count_invalidated(engine)
-            if invalidated:
-                st.caption(
-                    f"{invalidated} stored value(s) were invalidated by newer AEMO records; "
-                    "the replaced values are kept in superseded_quantity."
-                )
-            absent_points = pf.missing_points(engine) if row_count else []
-            if absent_points:
-                st.warning(
-                    "No stored rows for: " + ", ".join(absent_points) +
-                    ". Reload the full history to populate them."
-                )
-        except Exception as exc:
-            st.error(f"Pipeline flow table unavailable: {exc}")
-            return
+                last_attempt = pf.last_ingestion(engine)
+                if last_attempt:
+                    detail = f" - {last_attempt['message']}" if last_attempt.get('message') else ""
+                    st.caption(
+                        f"Last attempt: {last_attempt['mode']} / {last_attempt['status']} at "
+                        f"{last_attempt['started_at'].strftime('%Y-%m-%d %H:%M')}{detail}"
+                    )
+                invalidated = pf.count_invalidated(engine)
+                if invalidated:
+                    st.caption(
+                        f"{invalidated} stored value(s) were invalidated by newer AEMO records; "
+                        "the replaced values are kept in superseded_quantity."
+                    )
+                absent_points = pf.missing_points(engine) if row_count else []
+                if absent_points:
+                    st.warning(
+                        "No stored rows for: " + ", ".join(absent_points) +
+                        ". Reload the full history to populate them."
+                    )
+            except Exception as exc:
+                st.error(f"Pipeline flow table unavailable: {exc}")
         st.caption("The 27 MB history download only runs from here or from `python -m nt_pipeline_flows init`.")
         col1, col2 = st.columns(2)
         with col1:
@@ -2272,6 +2385,7 @@ def render_flow_admin(engine):
                     try:
                         st.success(f"Done: {pf.refresh_latest(engine)}")
                         get_cached_additional_flows.clear()
+                        get_flow_state.clear()
                     except Exception as exc:
                         st.error(f"Refresh failed: {exc}")
         with col2:
@@ -2281,6 +2395,7 @@ def render_flow_admin(engine):
                     try:
                         st.success(f"Done: {pf.initialise_history(engine)}")
                         get_cached_additional_flows.clear()
+                        get_flow_state.clear()
                     except Exception as exc:
                         st.error(f"Load failed: {exc}")
 
@@ -2304,65 +2419,33 @@ def main():
         loading_placeholder.empty()
         st.error(f"Database connection failed: {exc}")
         st.stop()
-    database_url = os.environ.get('DATABASE_URL')
-    
-    # Auto-fetch AEMO data on first load or if data is stale
+    db_key = _db_key(engine)
+    production_state = None
+
+    # Auto-fetch: the very first load blocks (nothing to show yet); later refreshes run in the background.
     try:
-        session = Session()
-        record_count = session.query(GBBRecord).count()
-        
-        # Check if we need to fetch data
-        should_fetch = False
-        fetch_reason = ""
-        
-        if record_count == 0:
-            # No data at all - definitely fetch
-            should_fetch = True
-            fetch_reason = "No data in database"
+        production_state = get_production_state(engine, db_key)
+        should_fetch, fetch_reason = production_refresh_decision(
+            production_state["record_count"], production_state["latest_import"])
+        if should_fetch and production_state["record_count"] == 0:
+            load_production_data_blocking(engine, Session, fetch_reason)
+            get_production_state.clear()
+            production_state = get_production_state(engine, db_key)
         else:
-            # Automatically refresh if data is older than 1 hour
-            latest_import = session.query(func.max(GBBRecord.imported_date)).scalar()
-            if latest_import:
-                hours_since_import = (datetime.now() - latest_import).total_seconds() / 3600
-                if hours_since_import > 1:
-                    should_fetch = True
-                    fetch_reason = f"Data is {hours_since_import:.1f} hours old"
-            else:
-                should_fetch = True
-                fetch_reason = "No previous import recorded"
-        
-        session.close()
-        
-        # Auto-fetch if needed
-        if should_fetch:
-            with st.spinner(f"Loading AEMO data... ({fetch_reason})"):
-                st.caption("Downloading and filtering NT AEMO records...")
-                fetch_aemo_data.clear()
-                raw_df = fetch_aemo_data()
-                
-                if raw_df is not None:
-                    st.caption(f"Preparing {len(raw_df):,} NT records for database import...")
-                    normalized_df = normalize_aemo_data(raw_df)
-                    
-                    if normalized_df is not None:
-                        st.caption("Saving NT records to PostgreSQL in batches...")
-                        success = upsert_gbb_data(engine, Session, normalized_df)
-                        
-                        if success:
-                            st.success("✅ AEMO data loaded successfully")
-                            # Clear cache to ensure fresh calculations
-                            st.cache_data.clear()
-                        else:
-                            st.warning("⚠️ Failed to load AEMO data - dashboard may show incomplete information")
-                else:
-                    st.warning("⚠️ Unable to fetch AEMO data - dashboard may show incomplete information")
-    
+            flow_state = get_flow_state(engine, db_key)
+            schedule_background_refresh(
+                engine, Session,
+                production_stale=should_fetch,
+                flows_stale=flow_state["should_refresh"] and flow_state["rows"] > 0
+            )
+
     except Exception as e:
         st.warning(f"⚠️ Auto-fetch check failed: {str(e)}")
     
-    # Get cached NT data; chart interactions do not re-query the database.
+    # Get cached NT data; reloaded only when a newer import exists, not on chart interactions.
     try:
-        nt_df = get_cached_nt_data(database_url)
+        nt_df = get_cached_nt_data(
+            engine, db_key, production_state["latest_import"] if production_state else None)
     except Exception as exc:
         loading_placeholder.empty()
         st.error(f"Unable to load cached production data: {exc}")
@@ -2370,13 +2453,11 @@ def main():
     finally:
         loading_placeholder.empty()
     
-    # Calculate metrics
-    metrics = calculate_nt_metrics(nt_df)
-    
-    # Calculate basin-level performance metrics
-    basin_metrics = calculate_basin_metrics(nt_df, metrics['common_date'])
+    if nt_df.empty and production_state and production_state["record_count"] > 0:
+        get_cached_nt_data.clear()  # do not keep a failed/empty load cached
 
-    qc_errors = validate_nt_metrics(metrics)
+    # Metrics are cached per dataset so widget interactions do not recompute them.
+    metrics, basin_metrics, qc_errors = get_cached_metrics(nt_df)
     if qc_errors:
         st.error("Headline QC failed: " + "; ".join(qc_errors))
         metrics['total_complete'] = False
@@ -2385,18 +2466,19 @@ def main():
     
     # Render dashboard - prioritized visual hierarchy
     render_header(metrics)
+    render_refresh_status()
     render_headline_kpi(metrics)
     render_nt_history_chart(metrics)  # Moved up - dominant visual
     render_field_cards(metrics, nt_df)
     render_data_freshness(metrics, nt_df)
     render_basin_composition(metrics)
     render_basin_performance(basin_metrics)  # New basin performance section
-    render_field_analysis(metrics, nt_df)  # Optional deeper analysis at bottom
     render_additional_flows_section(engine)
     
     # Admin section
     render_admin_section(engine, Session)
     render_flow_admin(engine)
+    render_field_analysis(metrics, nt_df)  # Collapsed and lazily loaded, at the bottom
     
     # Improved footer
     st.markdown("---")

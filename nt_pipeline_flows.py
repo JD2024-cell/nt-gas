@@ -658,11 +658,12 @@ def count_invalidated(engine):
         return _count(conn, t.invalidated_at.isnot(None))
 
 
-def load_flow_records(engine):
-    """Load stored tracked records as a DataFrame (nulls preserved)."""
+def load_flow_records(engine, columns=None):
+    """Load stored tracked records as a DataFrame (nulls preserved); `columns` limits the SELECT list."""
     table = PipelineConnectionFlow.__table__
     ids = sorted({p["connection_point_id"] for p in TRACKED_POINTS.values()})
-    stmt = select(table).where(table.c.connection_point_id.in_(ids)).order_by(table.c.gas_date)
+    selected = [table.c[c] for c in columns] if columns else [table]
+    stmt = select(*selected).where(table.c.connection_point_id.in_(ids)).order_by(table.c.gas_date)
     with engine.connect() as conn:
         frame = pd.read_sql(stmt, conn)
     frame["gas_date"] = pd.to_datetime(frame["gas_date"])
