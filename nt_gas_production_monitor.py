@@ -22,7 +22,6 @@ import threading
 import time
 from io import StringIO
 from datetime import datetime, timedelta
-from plotly.subplots import make_subplots
 # Database imports
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, UniqueConstraint, select
 from sqlalchemy.orm import sessionmaker, declarative_base
@@ -1442,82 +1441,94 @@ def render_data_freshness(metrics, nt_df):
             st.warning("No common gas date is available; a mixed-date NT total is not displayed.")
     
 
-def render_nt_history_chart(metrics):
-    """Render stacked area chart of NT production history with compact period selector"""
-    st.markdown("---")
-    st.subheader("NT Gas Production History")
-    
-    if metrics['daily_by_field'].empty:
-        st.warning("No historical data available")
-        return
-    
-    # Compact period selector using radio buttons styled horizontally (3M default)
-    period = st.radio(
-        "Time Period",
-        ["1M", "3M", "6M", "1Y", "All"],
-        index=1,
-        horizontal=True,
-        label_visibility="collapsed"
-    )
-    
-    # Filter data by period
-    df = metrics['daily_by_field'].copy()
-    df = df.sort_values('gas_date')
-    
-    if period == "1M":
-        cutoff = datetime.now() - timedelta(days=30)
-    elif period == "3M":
-        cutoff = datetime.now() - timedelta(days=90)
-    elif period == "6M":
-        cutoff = datetime.now() - timedelta(days=180)
-    elif period == "1Y":
-        cutoff = datetime.now() - timedelta(days=365)
+HISTORY_PERIOD_DAYS = {"1M": 30, "3M": 90, "6M": 180, "1Y": 365}
+HISTORY_VIEWS = ("All", "Production only", "Additional flows only")
+# Pipeline-flow line styles: colours distinct from every field colour, and dashed so they never read as stacked production.
+FLOW_LINE_STYLE = {
+    "ichthys_domestic": {"color": "#1F3A93", "dash": "dash"},
+    "darwin_lng_domestic": {"color": "#7B1FA2", "dash": "dot"},
+    "ngp_net_westward": {"color": "#6D4C41", "dash": "dashdot"},
+}
+
+def history_field_label(field_name):
+    return "Shenandoah South" if field_name == "Sturt Plateau Gas Plant" else field_name
+
+def history_field_options(daily_by_field):
+    present = set(daily_by_field['nt_field'].dropna().unique())
+    producing = set(get_producing_fields())
+    return [name for name in FIELD_DISPLAY_ORDER if name in producing and name in present]
+
+def build_history_figure(daily_by_field, flows, period, selected_fields, selected_flows, now=None):
+    """Stacked field production (areas) plus pipeline flows (lines); flows never enter the production total."""
+    now = now or datetime.now()
+    df = daily_by_field.sort_values('gas_date')
+
+    if period in HISTORY_PERIOD_DAYS:
+        cutoff = now - timedelta(days=HISTORY_PERIOD_DAYS[period])
     else:
-        cutoff = df['gas_date'].min()
-    
+        starts = []
+        if selected_fields:
+            starts.append(df['gas_date'].min())
+        if selected_flows:
+            starts.append(flows.index.min())
+        cutoff = min(starts)
+
     df = df[df['gas_date'] >= cutoff]
-    
-    # Create stacked area chart
     fig = go.Figure()
-    
-    # Add area trace for each producing field
+    production_group = dict(legendgroup="production", legendgrouptitle_text="NT field production (stacked, in NT total)")
+
     for field_name in FIELD_DISPLAY_ORDER:
-        if field_name in get_producing_fields():
-            field_data = df[df['nt_field'] == field_name].copy()
-            
+        if field_name in selected_fields:
+            field_data = df[df['nt_field'] == field_name]
             if not field_data.empty:
-                legend_label = (
-                    "Shenandoah South"
-                    if field_name == "Sturt Plateau Gas Plant"
-                    else field_name
-                )
                 fig.add_trace(go.Scatter(
                     x=field_data['gas_date'],
                     y=field_data['supply'],
-                    name=legend_label,
+                    name=history_field_label(field_name),
                     mode='lines',
                     stackgroup='one',
                     fillcolor=get_field_color(field_name),
-                    line=dict(width=0.5, color=get_field_color(field_name))
+                    line=dict(width=0.5, color=get_field_color(field_name)),
+                    **production_group
                 ))
-    
-    # Add total line overlay
-    daily_total = df.groupby('gas_date')['supply'].sum().reset_index()
-    fig.add_trace(go.Scatter(
-        x=daily_total['gas_date'],
-        y=daily_total['supply'],
-        name='Total NT Production',
-        mode='lines',
-        line=dict(color='#1a1a1a', width=2.5),
-        showlegend=True
-    ))
-    
+
+    if selected_fields:
+        daily_total = df[df['nt_field'].isin(selected_fields)].groupby('gas_date')['supply'].sum().reset_index()
+        all_selected = set(selected_fields) == set(history_field_options(daily_by_field))
+        fig.add_trace(go.Scatter(
+            x=daily_total['gas_date'],
+            y=daily_total['supply'],
+            name='Total NT Production' if all_selected else 'Total of selected fields',
+            mode='lines',
+            line=dict(color='#1a1a1a', width=2.5),
+            showlegend=True,
+            **production_group
+        ))
+
+    for key in selected_flows:
+        cfg = pf.DISPLAY_SOURCES[key]
+        style = FLOW_LINE_STYLE[key]
+        series = flows.loc[flows.index >= cutoff, cfg['column']]
+        fig.add_trace(go.Scatter(
+            x=series.index,
+            y=series.values,
+            name=cfg['chart_label'],
+            mode='lines',
+            line=dict(color=style['color'], width=2.5, dash=style['dash']),
+            connectgaps=False,
+            legendgroup="flows",
+            legendgrouptitle_text="Pipeline flows (lines, not in NT total)"
+        ))
+
+    y_title = (
+        'Production / supply (TJ/day)' if selected_fields and selected_flows
+        else 'Production (TJ/day)' if selected_fields else 'Pipeline flow (TJ/day)'
+    )
     fig.update_layout(
-        height=420,
+        height=440,
         hovermode='x unified',
         font=dict(color='#1a1a1a', size=11),
         xaxis_title='',
-        yaxis_title='Production (TJ/day)',
         margin=dict(t=15, b=45, l=42, r=10),
         legend=dict(
             orientation="h",
@@ -1544,17 +1555,78 @@ def render_nt_history_chart(metrics):
             linecolor='#e0e0e0',
             showline=True,
             title=dict(
-                text='Production (TJ/day)',
+                text=y_title,
                 font=dict(color='#1a1a1a', size=11)
             )
         )
     )
-    
+    return fig
+
+def _apply_history_view(field_options, flow_options):
+    view = st.session_state["hist_view"]
+    st.session_state["hist_sources"] = (
+        field_options if view == "Production only"
+        else flow_options if view == "Additional flows only"
+        else field_options + flow_options
+    )
+
+def render_nt_history_chart(metrics, flow_result=None):
+    """Combined history: stacked field production with the additional pipeline flows as separate lines."""
+    st.markdown("---")
+    st.subheader("NT Gas Production & Supply History")
+
+    if metrics['daily_by_field'].empty:
+        st.warning("No historical data available")
+        return
+
+    flows = None
+    if flow_result and flow_result["status"] == "ok" and flow_result["flows"] is not None and not flow_result["flows"].empty:
+        flows = flow_result["flows"]
+    field_options = history_field_options(metrics['daily_by_field'])
+    flow_options = list(pf.DISPLAY_SOURCES) if flows is not None else []
+    all_options = field_options + flow_options
+    labels = {name: history_field_label(name) for name in field_options}
+    labels.update({key: cfg['chart_label'] for key, cfg in pf.DISPLAY_SOURCES.items()})
+
+    ctrl1, ctrl2 = st.columns([3, 4])
+    with ctrl1:
+        period = st.radio(
+            "Time Period", ["1M", "3M", "6M", "1Y", "All"], index=1,
+            horizontal=True, label_visibility="collapsed", key="hist_period"
+        )
+    with ctrl2:
+        if flow_options:
+            st.radio(
+                "Show", HISTORY_VIEWS, horizontal=True, label_visibility="collapsed", key="hist_view",
+                on_change=_apply_history_view, args=(field_options, flow_options)
+            )
+    st.session_state["hist_sources"] = [
+        s for s in st.session_state.get("hist_sources", all_options) if s in all_options
+    ]
+    selected = st.multiselect(
+        "Sources", all_options, format_func=lambda key: labels[key], key="hist_sources"
+    )
+    selected_fields = [s for s in selected if s in field_options]
+    selected_flows = [s for s in selected if s in flow_options]
+    if not selected:
+        st.info("Select one or more sources to view history")
+        return
+
+    fig = build_history_figure(metrics['daily_by_field'], flows, period, selected_fields, selected_flows)
     st.plotly_chart(
         fig,
         width='stretch',
-        config={'displayModeBar': True, 'displaylogo': False, 'responsive': True}
+        config={'displayModeBar': True, 'displaylogo': False, 'responsive': True},
+        key="nt_history_chart"
     )
+    if flows is not None:
+        st.caption(
+            "Stacked areas and the black total line are NT field production only. Dashed lines are AEMO pipeline "
+            "connection flows, shown separately and not included in the production total or basin figures. "
+            "Gaps in a line indicate unpublished or missing reports, not zero flow."
+        )
+    elif flow_result and flow_result["status"] != "ok":
+        st.caption("Pipeline flow lines are unavailable until the flow data are loaded - see Additional NT Gas Supply Flows below.")
 
 def render_basin_composition(metrics):
     """Render compact visual basin-level production breakdown"""
@@ -2171,71 +2243,11 @@ def render_additional_flow_cards(flows):
             )
             st.caption("Last 90 days")
             st.plotly_chart(
-                _flow_sparkline(series, cfg['color']),
+                _flow_sparkline(series, FLOW_LINE_STYLE[key]['color']),
                 width='stretch',
                 config={'displayModeBar': False},
                 key=f"addl_flow_spark_{key}"
             )
-
-def render_additional_flow_chart(flows):
-    st.markdown("**Historical flows**")
-    labels = {key: cfg['label'] for key, cfg in pf.DISPLAY_SOURCES.items()}
-    selected = st.multiselect(
-        "Select flows",
-        list(labels),
-        default=list(labels),
-        format_func=lambda key: labels[key],
-        key="addl_flow_sources"
-    )
-    ctrl1, ctrl2 = st.columns(2)
-    with ctrl1:
-        period = st.radio(
-            "Time Period", ["1M", "3M", "6M", "1Y", "All"], index=1,
-            horizontal=True, key="addl_flow_period"
-        )
-    with ctrl2:
-        layout = st.radio(
-            "Layout", ["Overlay", "Separate panels"], horizontal=True, key="addl_flow_layout"
-        )
-    if not selected:
-        st.info("Select one or more flows to view history")
-        return
-
-    days = {"1M": 30, "3M": 90, "6M": 180, "1Y": 365}.get(period)
-    end = flows.index.max()
-    window = flows if days is None else flows.loc[end - pd.Timedelta(days=days):]
-
-    if layout == "Overlay":
-        fig = go.Figure()
-        rows = 1
-    else:
-        rows = len(selected)
-        fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.06)
-    for position, key in enumerate(selected, start=1):
-        cfg = pf.DISPLAY_SOURCES[key]
-        trace = go.Scatter(
-            x=window.index, y=window[cfg['column']], name=cfg['chart_label'], mode='lines',
-            line=dict(width=2, color=cfg['color']), connectgaps=False
-        )
-        if layout == "Overlay":
-            fig.add_trace(trace)
-        else:
-            fig.add_trace(trace, row=position, col=1)
-            fig.update_yaxes(title_text="TJ/d", row=position, col=1, showgrid=True, gridcolor='#f0f0f0')
-    fig.update_layout(
-        height=350 if layout == "Overlay" else 200 * rows + 60,
-        hovermode='x unified',
-        font=dict(color='#1a1a1a', size=11),
-        yaxis_title='Flow (TJ/day)' if layout == "Overlay" else None,
-        margin=dict(t=10, b=40, l=50, r=20),
-        plot_bgcolor='white', paper_bgcolor='white',
-        xaxis=dict(showgrid=True, gridcolor='#f0f0f0'),
-        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1, font=dict(size=11))
-    )
-    if layout == "Overlay":
-        fig.update_yaxes(showgrid=True, gridcolor='#f0f0f0')
-    st.plotly_chart(fig, width='stretch', key="addl_flow_history_chart")
-    st.caption("Series are plotted separately and are not summed. Gaps indicate unpublished or missing reports, not zero flow.")
 
 def render_ngp_diagnostics(flows, check_config):
     with st.expander("NGP netting diagnostics"):
@@ -2303,46 +2315,55 @@ def render_additional_flow_methodology():
 
         **Dingo:** not included. No daily AEMO reporting point has been verified for the Dingo field, and Palm Valley Pipeline flows are not used as a substitute.
 
-        **Not additive:** these flows are shown separately and are not included in the NT field-production total above. No combined NT supply total is shown because measurement boundaries and double counting between these sources and field production have not been assessed.
+        **Not additive:** these flows are shown separately and are not included in the NT field-production total above. In the history chart they are drawn as dashed lines over the stacked field production and are excluded from the stacked areas, the total line, the headline figures and the basin calculations. No combined NT supply total is shown because measurement boundaries and double counting between these sources and field production have not been assessed.
 
         **7-day average:** mean of the seven gas days ending on the latest available date; shown only when all seven days are reported.
         """)
 
-def render_additional_flows_section(engine):
-    """Render the additional supply flows section; failures never affect the sections above it."""
-    st.markdown("---")
-    st.subheader("Additional NT Gas Supply Flows")
-    st.caption(
-        "Separate from the field-production total above and not added to it. "
-        "Source: AEMO Pipeline Connection Flow, TJ/d."
-    )
-    check_config = pf.NgpCheckConfig.from_env()
+def load_additional_flows(engine, check_config):
+    """Cached flow table for the combined chart and the flow section; never raises."""
     try:
         db_key = _db_key(engine)
         state = get_flow_state(engine, db_key)
         if state["rows"] == 0:
-            st.info(
-                "Pipeline flow history has not been loaded yet. Run `python -m nt_pipeline_flows init` or use "
-                "Pipeline Flow Ingestion in the admin area below. The 27 MB history is deliberately not "
-                "downloaded while the dashboard is viewed."
-            )
-            render_additional_flow_methodology()
-            return
-        flow_error = _refresh_manager()["flow_error"]
-        if flow_error:
-            st.warning(flow_error)
+            return {"flows": None, "status": "not_initialised", "error": None}
         flows = get_cached_additional_flows(engine, db_key, state["token"], check_config)
+        return {"flows": flows, "status": "ok", "error": None}
     except Exception as exc:
         logger.exception("Additional flows unavailable: %s", exc)
-        st.warning(f"Additional NT gas supply flows are unavailable: {exc}")
+        return {"flows": None, "status": "error", "error": str(exc)}
+
+def render_additional_flows_section(engine, flow_result=None, check_config=None):
+    """Render the additional supply flows section; failures never affect the sections above it."""
+    st.markdown("---")
+    st.subheader("Additional NT Gas Supply Flows")
+    st.caption(
+        "Separate from the field-production total and not added to it. Source: AEMO Pipeline Connection Flow, TJ/d. "
+        "Historical lines are in the NT Gas Production & Supply History chart above."
+    )
+    check_config = check_config or pf.NgpCheckConfig.from_env()
+    flow_result = flow_result or load_additional_flows(engine, check_config)
+    if flow_result["status"] == "not_initialised":
+        st.info(
+            "Pipeline flow history has not been loaded yet. Run `python -m nt_pipeline_flows init` or use "
+            "Pipeline Flow Ingestion in the admin area below. The 27 MB history is deliberately not "
+            "downloaded while the dashboard is viewed."
+        )
         render_additional_flow_methodology()
         return
+    if flow_result["status"] == "error":
+        st.warning(f"Additional NT gas supply flows are unavailable: {flow_result['error']}")
+        render_additional_flow_methodology()
+        return
+    flow_error = _refresh_manager()["flow_error"]
+    if flow_error:
+        st.warning(flow_error)
+    flows = flow_result["flows"]
 
     if flows is None or flows.empty:
         st.info("No pipeline connection flow data is available yet.")
     else:
         render_additional_flow_cards(flows)
-        render_additional_flow_chart(flows)
         render_ngp_diagnostics(flows, check_config)
     render_additional_flow_methodology()
 
@@ -2468,12 +2489,14 @@ def main():
     render_header(metrics)
     render_refresh_status()
     render_headline_kpi(metrics)
-    render_nt_history_chart(metrics)  # Moved up - dominant visual
+    check_config = pf.NgpCheckConfig.from_env()
+    flow_result = load_additional_flows(engine, check_config)  # cached; shared by the chart and the flow section
+    render_nt_history_chart(metrics, flow_result)  # Moved up - dominant visual
     render_field_cards(metrics, nt_df)
     render_data_freshness(metrics, nt_df)
     render_basin_composition(metrics)
     render_basin_performance(basin_metrics)  # New basin performance section
-    render_additional_flows_section(engine)
+    render_additional_flows_section(engine, flow_result, check_config)
     
     # Admin section
     render_admin_section(engine, Session)
